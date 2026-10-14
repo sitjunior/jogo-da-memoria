@@ -37,6 +37,9 @@ A (ou Enter, no teclado) no seu controle para ocupar uma vaga. Quem apertou "Jog
 com a vaga do Jogador 1.
 
 - Na partida, só o controle do jogador da vez mexe no cursor; os outros são ignorados.
+- Para **começar sem esperar todo mundo entrar**, use o botão **Começar agora** na parte de baixo da
+  tela: clique ou toque nele, aperte **+** no controle, ou aperte **Baixo** e depois **A**/Enter.
+  As vagas que ninguém assumiu jogam com qualquer dispositivo.
 - Faltou controle? Aperte **Y** (ou **Tab**) e o resto dos jogadores divide aquele controle.
 - **B** (ou Backspace) libera a vaga. **Esc** ou **+** volta ao menu.
 - Se um controle desconectar no meio da partida, o jogo pausa e pede para atribuir de novo,

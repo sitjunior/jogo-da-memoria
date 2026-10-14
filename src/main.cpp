@@ -415,6 +415,7 @@ private:
     std::vector<SDL_Joystick*> joys_;  // joysticks que o SDL não reconhece como controle
     Audio audio_;
     bool swapAB_ = kSwapABDefault;
+    bool assignOnButton_ = false;  // foco no botão "Começar agora" da tela de controles
     bool debugInput_ = false;
     std::unordered_map<int, std::array<int, 2>> stick_;  // por dispositivo
     std::unordered_map<int, int> padNumber_;             // id -> "Controle N"
@@ -443,6 +444,8 @@ private:
     void gameInput(const Input& in);
     void resultInput(const Input& in);
     void assignInput(const Input& in);
+    void finishAssign();
+    SDL_Rect assignButtonRect() const;
     bool allowed(const Input& in) const;
     void requestStart(bool reuseSlots, int starter);
     void padRemoved(int id);
@@ -1005,6 +1008,7 @@ void App::requestStart(bool reuseSlots, int starter) {
     slots_[0] = starter;  // quem apertou "Jogar" já é o Jogador 1
 #endif
     session_.reset();
+    assignOnButton_ = false;
     screen_ = Screen::Assign;
 }
 
@@ -1014,13 +1018,43 @@ void App::padRemoved(int id) {
     bool used = false;
     for (int& d : slots_)
         if (d == id) { d = kDeviceNone; used = true; }
-    if (used && screen_ == Screen::Game) screen_ = Screen::Assign;
+    if (used && screen_ == Screen::Game) {
+        assignOnButton_ = false;
+        screen_ = Screen::Assign;
+    }
+}
+
+SDL_Rect App::assignButtonRect() const {
+    return {kW / 2 - 190, 548, 380, 68};
+}
+
+// Vagas que ninguém assumiu ficam abertas: quem estiver na vez joga com qualquer dispositivo.
+void App::finishAssign() {
+    for (int& d : slots_)
+        if (d == kDeviceNone) d = kDeviceAny;
+    if (session_) screen_ = Screen::Game;  // voltando de uma pausa
+    else if (!startGame()) toMenu();
 }
 
 void App::assignInput(const Input& in) {
     auto owns = [&](int dev) { return std::find(slots_.begin(), slots_.end(), dev) != slots_.end(); };
     switch (in.action) {
-        case Action::Confirm: case Action::Click: {
+        case Action::Down: assignOnButton_ = true; return;
+        case Action::Up: assignOnButton_ = false; return;
+        case Action::Confirm:
+            // Com o foco no botão, quem já tem vaga aperta de novo para começar;
+            // quem ainda não entrou continua entrando.
+            if (assignOnButton_ && owns(in.device)) { finishAssign(); return; }
+            if (owns(in.device)) break;
+            {
+                auto it = std::find(slots_.begin(), slots_.end(), kDeviceNone);
+                if (it != slots_.end()) *it = in.device;
+            }
+            break;
+        case Action::Click: {
+            const SDL_Rect b = assignButtonRect();
+            const SDL_Point p{in.x, in.y};
+            if (SDL_PointInRect(&p, &b)) { finishAssign(); return; }
             if (owns(in.device)) break;
             auto it = std::find(slots_.begin(), slots_.end(), kDeviceNone);
             if (it != slots_.end()) *it = in.device;
@@ -1038,36 +1072,49 @@ void App::assignInput(const Input& in) {
                 toMenu();
             }
             return;
-        case Action::Quit: toMenu(); return;
+        case Action::Quit:
+            // + no controle começa o jogo; Esc no teclado volta ao menu.
+            if (in.device >= 0) finishAssign();
+            else toMenu();
+            return;
         default: return;
     }
-    if (std::find(slots_.begin(), slots_.end(), kDeviceNone) == slots_.end()) {
-        if (session_) screen_ = Screen::Game;  // voltando de uma pausa
-        else if (!startGame()) toMenu();
-    }
+    if (std::find(slots_.begin(), slots_.end(), kDeviceNone) == slots_.end()) finishAssign();
 }
 
 void App::renderAssign() {
     const int n = settings_.players;
-    gfx_.text("Controles", kBig, kInk, kW / 2, 100);
-    gfx_.text(session_ ? "Um controle desconectou: quem ficou sem controle aperta A de novo"
+    gfx_.text("Controles", kBig, kInk, kW / 2, 90);
+    gfx_.text(session_ ? "Um controle desconectou: quem ficou sem controle entra de novo"
                        : "Cada jogador usa o seu: A no controle, Enter no teclado ou clique no mouse",
-              kSmall, kMuted, kW / 2, 188);
+              kSmall, kMuted, kW / 2, 164);
     const auto firstFree = std::find(slots_.begin(), slots_.end(), kDeviceNone);
+    int freeSlots = 0;
+    for (int d : slots_) freeSlots += d == kDeviceNone;
     for (int i = 0; i < n; ++i) {
-        const SDL_Rect rc{kW / 2 - 350, 232 + i * 92, 700, 76};
-        const bool next = firstFree != slots_.end() && i == int(firstFree - slots_.begin());
-        if (next) gfx_.fillRound({rc.x - 5, rc.y - 5, rc.w + 10, rc.h + 10}, 28, kInk);
-        gfx_.fillRound(rc, 24, kWhite);
-        gfx_.fillRound({rc.x + 14, rc.y + 14, 48, 48}, 24, kPlayerColor[i]);
-        gfx_.text("Jogador " + std::to_string(i + 1), kMedium, kInk, rc.x + 82, rc.y + rc.h / 2, Align::Left);
+        const SDL_Rect rc{kW / 2 - 350, 200 + i * 82, 700, 68};
+        const bool next = !assignOnButton_ && firstFree != slots_.end() && i == int(firstFree - slots_.begin());
+        if (next) gfx_.fillRound({rc.x - 5, rc.y - 5, rc.w + 10, rc.h + 10}, 26, kInk);
+        gfx_.fillRound(rc, 22, kWhite);
+        gfx_.fillRound({rc.x + 14, rc.y + 12, 44, 44}, 22, kPlayerColor[i]);
+        gfx_.text("Jogador " + std::to_string(i + 1), kMedium, kInk, rc.x + 76, rc.y + rc.h / 2, Align::Left);
         if (slots_[i] == kDeviceNone)
             gfx_.text("A / Enter / clique", kSmall, kMuted, rc.x + rc.w - 28, rc.y + rc.h / 2, Align::Right);
         else
             gfx_.text(deviceName(slots_[i]), kMedium, kPlayerColor[i], rc.x + rc.w - 28, rc.y + rc.h / 2, Align::Right);
     }
-    gfx_.text("A, Enter ou clique: entrar     Y ou Tab: o resto joga neste dispositivo", kSmall, kMuted, kW / 2, kH - 62);
-    gfx_.text("B ou Backspace: sair da vaga     Esc ou +: menu", kSmall, kMuted, kW / 2, kH - 28);
+    const SDL_Rect btn = assignButtonRect();
+    if (assignOnButton_) gfx_.fillRound({btn.x - 6, btn.y - 6, btn.w + 12, btn.h + 12}, 40, kInk);
+    gfx_.fillRound(btn, 34, kPlayerColor[2]);
+    gfx_.text("Começar agora", kMedium, kWhite, btn.x + btn.w / 2, btn.y + btn.h / 2);
+    if (freeSlots > 0)
+        gfx_.text(std::to_string(freeSlots) + (freeSlots == 1 ? " vaga livre joga" : " vagas livres jogam") +
+                      " com qualquer controle",
+                  kSmall, kMuted, kW / 2, btn.y + btn.h + 24);
+    gfx_.text("A, Enter ou clique: entrar     Baixo e depois A (ou clique, ou +): começar agora", kSmall,
+              kMuted, kW / 2, kH - 52);
+    gfx_.text("Y ou Tab: o resto joga neste dispositivo     B ou Backspace: sair da vaga     Esc: menu",
+              kSmall, kMuted, kW / 2, kH - 24);
 }
 
 void App::handle(const Input& in) {
