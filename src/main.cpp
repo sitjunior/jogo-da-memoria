@@ -1,0 +1,836 @@
+// Jogo da Memória: camada de plataforma SDL2 (Mac e Nintendo Switch).
+// Toda a regra do jogo vive em core/; aqui ficam janela, entrada e desenho.
+#include <SDL.h>
+#include <SDL_image.h>
+#include <SDL_ttf.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <memory>
+#include <random>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "game.hpp"
+
+namespace {
+
+constexpr int kW = 1280;  // resolução lógica (a do Switch portátil)
+constexpr int kH = 720;
+
+struct Color {
+    Uint8 r, g, b, a = 255;
+};
+const Color kBg{250, 246, 236};
+const Color kInk{58, 48, 72};
+const Color kMuted{140, 130, 150};
+const Color kWhite{255, 255, 255};
+const Color kEdge{222, 214, 200};
+const Color kPlayerColor[memory::kMaxPlayers] = {
+    {239, 83, 80}, {66, 165, 245}, {102, 187, 106}, {255, 167, 38}};
+
+struct GridSize {
+    int cols, rows;
+};
+const GridSize kSizes[] = {{4, 3}, {4, 4}, {6, 4}};
+constexpr int kSizeCount = 3;
+
+// ---------------------------------------------------------------- arquivos
+
+bool pathIs(const std::string& p, bool wantDir) {
+    struct stat st;
+    if (stat(p.c_str(), &st) != 0) return false;
+    return wantDir ? S_ISDIR(st.st_mode) : S_ISREG(st.st_mode);
+}
+
+std::string findAssets() {
+    std::vector<std::string> candidates;
+    if (const char* env = std::getenv("MEMORIA_ASSETS")) candidates.push_back(env);
+    if (char* base = SDL_GetBasePath()) {
+        candidates.push_back(std::string(base) + "assets");
+        candidates.push_back(std::string(base) + "../Resources/assets");  // .app do Mac
+        SDL_free(base);
+    }
+    candidates.push_back("assets");
+    candidates.push_back("romfs:/assets");                      // Switch (romfs no .nro)
+    candidates.push_back("sdmc:/switch/jogo-da-memoria/assets");  // Switch (cartão SD)
+#ifdef MEMORIA_SOURCE_ASSETS
+    candidates.push_back(MEMORIA_SOURCE_ASSETS);
+#endif
+    for (const auto& c : candidates)
+        if (pathIs(c + "/themes", true)) return c;
+    return "";
+}
+
+struct Theme {
+    std::string name;
+    std::string dir;
+    int faces = 0;
+};
+
+std::vector<Theme> scanThemes(const std::string& assets) {
+    std::vector<Theme> themes;
+    std::vector<std::string> names;
+    if (DIR* d = opendir((assets + "/themes").c_str())) {
+        while (dirent* e = readdir(d)) {
+            if (e->d_name[0] != '.') names.push_back(e->d_name);
+        }
+        closedir(d);
+    }
+    std::sort(names.begin(), names.end());
+    for (const auto& n : names) {
+        Theme t{n, assets + "/themes/" + n, 0};
+        if (!pathIs(t.dir + "/back.png", false)) continue;
+        char buf[16];
+        for (int i = 1; i < 100; ++i) {
+            std::snprintf(buf, sizeof buf, "/%02d.png", i);
+            if (!pathIs(t.dir + buf, false)) break;
+            ++t.faces;
+        }
+        // Precisa de pares suficientes para a menor grade.
+        if (t.faces >= kSizes[0].cols * kSizes[0].rows / 2) themes.push_back(t);
+    }
+    return themes;
+}
+
+// ------------------------------------------------------------------ desenho
+
+enum class Align { Left, Center, Right };
+enum Font { kSmall = 0, kMedium = 1, kBig = 2 };
+
+class Gfx {
+public:
+    SDL_Renderer* r = nullptr;
+
+    bool loadFonts(const std::string& path) {
+        const int sizes[3] = {26, 38, 84};
+        for (int i = 0; i < 3; ++i) {
+            fonts_[i] = TTF_OpenFont(path.c_str(), sizes[i]);
+            if (!fonts_[i]) return false;
+        }
+        // O Fredoka variável abre no peso Light; negrito sintético deixa o texto legível.
+        for (auto* f : fonts_) TTF_SetFontStyle(f, TTF_STYLE_BOLD);
+        return true;
+    }
+    // Libera texturas e fontes; precisa rodar antes de destruir o renderer e de TTF_Quit().
+    void shutdown() {
+        clearCache();
+        for (auto*& f : fonts_) {
+            if (f) TTF_CloseFont(f);
+            f = nullptr;
+        }
+    }
+    ~Gfx() { shutdown(); }
+
+    void color(Color c) { SDL_SetRenderDrawColor(r, c.r, c.g, c.b, c.a); }
+    void fill(SDL_Rect rc, Color c) {
+        color(c);
+        SDL_RenderFillRect(r, &rc);
+    }
+
+    void fillRound(SDL_Rect rc, int rad, Color c) {
+        rad = std::max(0, std::min({rad, rc.w / 2, rc.h / 2}));
+        color(c);
+        SDL_Rect mid{rc.x, rc.y + rad, rc.w, rc.h - 2 * rad};
+        SDL_RenderFillRect(r, &mid);
+        for (int dy = 0; dy < rad; ++dy) {
+            const float yy = rad - dy - 0.5f;
+            const int dx = rad - static_cast<int>(std::sqrt(float(rad * rad) - yy * yy));
+            SDL_RenderDrawLine(r, rc.x + dx, rc.y + dy, rc.x + rc.w - 1 - dx, rc.y + dy);
+            SDL_RenderDrawLine(r, rc.x + dx, rc.y + rc.h - 1 - dy, rc.x + rc.w - 1 - dx,
+                               rc.y + rc.h - 1 - dy);
+        }
+    }
+
+    void triangle(float x1, float y1, float x2, float y2, float x3, float y3, Color c) {
+        SDL_Color sc{c.r, c.g, c.b, c.a};
+        SDL_Vertex v[3] = {{{x1, y1}, sc, {0, 0}}, {{x2, y2}, sc, {0, 0}}, {{x3, y3}, sc, {0, 0}}};
+        SDL_RenderGeometry(r, nullptr, v, 3, nullptr, 0);
+    }
+    void arrow(int cx, int cy, int s, bool left, Color c) {
+        const float d = left ? -1.f : 1.f;
+        triangle(cx - d * s / 2.f, cy - s, cx - d * s / 2.f, cy + s, cx + d * s / 2.f,
+                 float(cy), c);
+    }
+
+    void text(const std::string& s, Font font, Color c, int x, int y,
+              Align a = Align::Center) {
+        SDL_Texture* t = textTexture(s, font, c);
+        if (!t) return;
+        int w, h;
+        SDL_QueryTexture(t, nullptr, nullptr, &w, &h);
+        const int dx = a == Align::Left ? x : a == Align::Center ? x - w / 2 : x - w;
+        SDL_Rect d{dx, y - h / 2, w, h};
+        SDL_RenderCopy(r, t, nullptr, &d);
+    }
+
+private:
+    TTF_Font* fonts_[3] = {nullptr, nullptr, nullptr};
+    std::unordered_map<std::string, SDL_Texture*> cache_;
+
+    void clearCache() {
+        for (auto& kv : cache_) SDL_DestroyTexture(kv.second);
+        cache_.clear();
+    }
+    SDL_Texture* textTexture(const std::string& s, Font font, Color c) {
+        if (s.empty()) return nullptr;
+        const std::string key = std::to_string(font) + ':' + std::to_string(c.r) + ',' +
+                                std::to_string(c.g) + ',' + std::to_string(c.b) + ':' + s;
+        auto it = cache_.find(key);
+        if (it != cache_.end()) return it->second;
+        if (cache_.size() > 300) clearCache();
+        SDL_Surface* surf =
+            TTF_RenderUTF8_Blended(fonts_[font], s.c_str(), SDL_Color{c.r, c.g, c.b, 255});
+        if (!surf) return nullptr;
+        SDL_Texture* tex = SDL_CreateTextureFromSurface(r, surf);
+        SDL_FreeSurface(surf);
+        if (tex) cache_[key] = tex;
+        return tex;
+    }
+};
+
+// ------------------------------------------------------------------- entrada
+
+enum class Action {
+    Up, Down, Left, Right, Confirm, Back, Quit, Click,
+    DebugMatch,     // só pelo roteiro de teste (MEMORIA_SCRIPT)
+    DebugMismatch,  // idem
+};
+struct Input {
+    Action action;
+    int x = 0, y = 0;  // coordenadas lógicas, para Click
+};
+
+// -------------------------------------------------------------------- sessão
+
+struct Session {
+    std::unique_ptr<memory::Game> game;
+    int cols = 0, rows = 0;
+    std::vector<float> flip;    // 0 = de costas, 1 = de frente
+    std::vector<int> owner;     // quem fechou o par (-1 = ninguém)
+    std::vector<int> image;     // face lógica -> índice da imagem no tema
+    std::vector<SDL_Texture*> faceTex;
+    SDL_Texture* back = nullptr;
+    int cursor = 0;
+    int firstPick = -1;
+    float mismatchTimer = 0;
+    float finishTimer = 0;
+
+    Session() = default;
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+    ~Session() {
+        for (auto* t : faceTex)
+            if (t) SDL_DestroyTexture(t);
+        if (back) SDL_DestroyTexture(back);
+    }
+};
+
+enum class Screen { Menu, Game, Result };
+
+struct Settings {
+    int players = 2;
+    int size = 1;
+    int theme = 0;
+};
+
+class App {
+public:
+    bool init();
+    void run();
+    ~App();
+
+private:
+    SDL_Window* window_ = nullptr;
+    Gfx gfx_;
+    std::string assets_;
+    std::vector<Theme> themes_;
+    Settings settings_;
+    Screen screen_ = Screen::Menu;
+    int menuRow_ = 3;
+    std::unique_ptr<Session> session_;
+    bool running_ = true;
+    std::vector<SDL_GameController*> pads_;
+    int stick_[2] = {0, 0};
+    std::vector<Input> queue_;
+    float clock_ = 0;
+
+    // roteiro de teste automatizado
+    std::string script_;
+    size_t scriptPos_ = 0;
+    float scriptWait_ = 0;
+    std::string shotDir_;
+    int shotCount_ = 0;
+    bool shotPending_ = false;
+
+    void pumpEvents();
+    void pumpScript(float dt);
+    void handle(const Input& in);
+    void update(float dt);
+    void render();
+    void saveShot();
+
+    void menuInput(const Input& in);
+    void gameInput(const Input& in);
+    void resultInput(const Input& in);
+    bool startGame();
+    void toMenu();
+    void flipCard(int i);
+    void changeValue(int row, int dir);
+    SDL_Rect menuRowRect(int row) const;
+    SDL_Rect cardRect(int i) const;
+
+    void renderMenu();
+    void renderGame();
+    void renderResult();
+    void renderScoreboard(int y);
+    int  validSize(int size, int dir) const;
+    bool sizeFits(int size) const {
+        return kSizes[size].cols * kSizes[size].rows / 2 <= themes_[settings_.theme].faces;
+    }
+};
+
+App::~App() {
+    session_.reset();
+    gfx_.shutdown();
+    for (auto* p : pads_) SDL_GameControllerClose(p);
+    if (gfx_.r) SDL_DestroyRenderer(gfx_.r);
+    if (window_) SDL_DestroyWindow(window_);
+    TTF_Quit();
+    IMG_Quit();
+    SDL_Quit();
+}
+
+bool App::init() {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+        std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+        return false;
+    }
+    if (!(IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG) || TTF_Init() != 0) {
+        std::fprintf(stderr, "IMG/TTF init: %s\n", SDL_GetError());
+        return false;
+    }
+    assets_ = findAssets();
+    if (assets_.empty()) {
+        std::fprintf(stderr, "Pasta 'assets' não encontrada (use MEMORIA_ASSETS=...)\n");
+        return false;
+    }
+    themes_ = scanThemes(assets_);
+    if (themes_.empty()) {
+        std::fprintf(stderr, "Nenhum tema válido em %s/themes\n", assets_.c_str());
+        return false;
+    }
+
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
+    window_ = SDL_CreateWindow("Jogo da Memória", SDL_WINDOWPOS_CENTERED,
+                               SDL_WINDOWPOS_CENTERED, kW, kH,
+                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!window_) {
+        std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
+        return false;
+    }
+    gfx_.r = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    if (!gfx_.r) gfx_.r = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
+    if (!gfx_.r) {
+        std::fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
+        return false;
+    }
+    SDL_RenderSetLogicalSize(gfx_.r, kW, kH);
+    SDL_SetRenderDrawBlendMode(gfx_.r, SDL_BLENDMODE_BLEND);
+    if (!gfx_.loadFonts(assets_ + "/fonts/Fredoka.ttf")) {
+        std::fprintf(stderr, "Fonte não carregada: %s\n", TTF_GetError());
+        return false;
+    }
+
+    for (int i = 0; i < SDL_NumJoysticks(); ++i)
+        if (SDL_IsGameController(i))
+            if (auto* p = SDL_GameControllerOpen(i)) pads_.push_back(p);
+
+    if (const char* s = std::getenv("MEMORIA_SCRIPT")) script_ = s;
+    if (const char* d = std::getenv("MEMORIA_SHOT_DIR")) shotDir_ = d;
+    return true;
+}
+
+// ------------------------------------------------------------------ eventos
+
+void App::pumpEvents() {
+    auto push = [&](Action a, int x = 0, int y = 0) { queue_.push_back({a, x, y}); };
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        switch (e.type) {
+            case SDL_QUIT: running_ = false; break;
+            case SDL_KEYDOWN:
+                switch (e.key.keysym.sym) {
+                    case SDLK_UP: case SDLK_w: push(Action::Up); break;
+                    case SDLK_DOWN: case SDLK_s: push(Action::Down); break;
+                    case SDLK_LEFT: case SDLK_a: push(Action::Left); break;
+                    case SDLK_RIGHT: case SDLK_d: push(Action::Right); break;
+                    case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE:
+                        if (!e.key.repeat) push(Action::Confirm);
+                        break;
+                    case SDLK_BACKSPACE: push(Action::Back); break;
+                    case SDLK_ESCAPE: push(Action::Quit); break;
+                    case SDLK_f: case SDLK_F11: {
+                        const bool fs = SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+                        SDL_SetWindowFullscreen(window_, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                        break;
+                    }
+                    default: break;
+                }
+                break;
+            case SDL_MOUSEBUTTONDOWN:  // o toque na tela do Switch também vira clique
+                if (e.button.button == SDL_BUTTON_LEFT) {
+                    float lx, ly;
+                    SDL_RenderWindowToLogical(gfx_.r, e.button.x, e.button.y, &lx, &ly);
+                    push(Action::Click, int(lx), int(ly));
+                }
+                break;
+            case SDL_CONTROLLERDEVICEADDED:
+                if (auto* p = SDL_GameControllerOpen(e.cdevice.which)) pads_.push_back(p);
+                break;
+            case SDL_CONTROLLERDEVICEREMOVED:
+                if (auto* p = SDL_GameControllerFromInstanceID(e.cdevice.which)) {
+                    pads_.erase(std::remove(pads_.begin(), pads_.end(), p), pads_.end());
+                    SDL_GameControllerClose(p);
+                }
+                break;
+            case SDL_CONTROLLERBUTTONDOWN:
+                switch (e.cbutton.button) {
+                    case SDL_CONTROLLER_BUTTON_DPAD_UP: push(Action::Up); break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: push(Action::Down); break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: push(Action::Left); break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: push(Action::Right); break;
+                    case SDL_CONTROLLER_BUTTON_A: push(Action::Confirm); break;
+                    case SDL_CONTROLLER_BUTTON_B: push(Action::Back); break;
+                    case SDL_CONTROLLER_BUTTON_START: push(Action::Quit); break;
+                    default: break;
+                }
+                break;
+            case SDL_CONTROLLERAXISMOTION: {
+                const int axis = e.caxis.axis;
+                if (axis != SDL_CONTROLLER_AXIS_LEFTX && axis != SDL_CONTROLLER_AXIS_LEFTY) break;
+                int& st = stick_[axis == SDL_CONTROLLER_AXIS_LEFTY];
+                const int v = e.caxis.value;
+                const int dir = v > 16000 ? 1 : v < -16000 ? -1 : (std::abs(v) < 8000 ? 0 : st);
+                if (dir != st && dir != 0) {
+                    if (axis == SDL_CONTROLLER_AXIS_LEFTX) push(dir > 0 ? Action::Right : Action::Left);
+                    else push(dir > 0 ? Action::Down : Action::Up);
+                }
+                st = dir;
+                break;
+            }
+            default: break;
+        }
+    }
+}
+
+// Roteiro de teste: cada letra vira uma ação (u d l r c b), w espera, s tira foto,
+// m/e jogam um acerto/erro, q sai. Só ativo com MEMORIA_SCRIPT definido.
+void App::pumpScript(float dt) {
+    if (scriptPos_ >= script_.size()) return;
+    scriptWait_ -= dt;
+    if (scriptWait_ > 0) return;
+    scriptWait_ = 0.35f;
+    switch (script_[scriptPos_++]) {
+        case 'u': queue_.push_back({Action::Up}); break;
+        case 'd': queue_.push_back({Action::Down}); break;
+        case 'l': queue_.push_back({Action::Left}); break;
+        case 'r': queue_.push_back({Action::Right}); break;
+        case 'c': queue_.push_back({Action::Confirm}); break;
+        case 'b': queue_.push_back({Action::Back}); break;
+        case 'm': queue_.push_back({Action::DebugMatch}); break;
+        case 'e': queue_.push_back({Action::DebugMismatch}); break;
+        case 'w': scriptWait_ = 1.6f; break;
+        case 's': shotPending_ = true; break;
+        case 'q': running_ = false; break;
+        default: break;
+    }
+}
+
+void App::saveShot() {
+    shotPending_ = false;
+    if (shotDir_.empty()) return;
+    int w, h;
+    SDL_GetRendererOutputSize(gfx_.r, &w, &h);
+    SDL_Surface* s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!s) return;
+    SDL_RenderReadPixels(gfx_.r, nullptr, SDL_PIXELFORMAT_ARGB8888, s->pixels, s->pitch);
+    char name[512];
+    std::snprintf(name, sizeof name, "%s/shot%02d.bmp", shotDir_.c_str(), ++shotCount_);
+    SDL_SaveBMP(s, name);
+    SDL_FreeSurface(s);
+}
+
+// --------------------------------------------------------------------- menu
+
+SDL_Rect App::menuRowRect(int row) const {
+    if (row == 3) return {kW / 2 - 200, 560, 400, 84};
+    return {kW / 2 - 330, 230 + row * 100, 660, 80};
+}
+
+int App::validSize(int size, int dir) const {
+    for (int i = 0; i < kSizeCount; ++i) {
+        size = (size + dir + kSizeCount) % kSizeCount;
+        if (sizeFits(size)) return size;
+    }
+    return settings_.size;
+}
+
+void App::changeValue(int row, int dir) {
+    const int n = int(themes_.size());
+    switch (row) {
+        case 0: settings_.players = (settings_.players - 1 + dir + memory::kMaxPlayers) % memory::kMaxPlayers + 1; break;
+        case 1: settings_.size = validSize(settings_.size, dir); break;
+        case 2:
+            settings_.theme = (settings_.theme + dir + n) % n;
+            if (!sizeFits(settings_.size)) settings_.size = validSize(settings_.size, -1);
+            break;
+        default: break;
+    }
+}
+
+void App::menuInput(const Input& in) {
+    switch (in.action) {
+        case Action::Up: menuRow_ = (menuRow_ + 3) % 4; break;
+        case Action::Down: menuRow_ = (menuRow_ + 1) % 4; break;
+        case Action::Left: changeValue(menuRow_, -1); break;
+        case Action::Right: changeValue(menuRow_, +1); break;
+        case Action::Confirm:
+            if (menuRow_ == 3) startGame();
+            else changeValue(menuRow_, +1);
+            break;
+        case Action::Quit: running_ = false; break;
+        case Action::Click:
+            for (int row = 0; row < 4; ++row) {
+                const SDL_Rect rc = menuRowRect(row);
+                const SDL_Point p{in.x, in.y};
+                if (!SDL_PointInRect(&p, &rc)) continue;
+                menuRow_ = row;
+                if (row == 3) startGame();
+                else changeValue(row, in.x < rc.x + rc.w - 170 ? -1 : +1);
+            }
+            break;
+        default: break;
+    }
+}
+
+bool App::startGame() {
+    const Theme& th = themes_[settings_.theme];
+    const GridSize gs = kSizes[settings_.size];
+    auto s = std::make_unique<Session>();
+
+    std::random_device rd;
+    memory::Config cfg{gs.rows, gs.cols, settings_.players, rd() ^ std::uint32_t(std::time(nullptr))};
+    s->game = std::make_unique<memory::Game>(cfg);
+    s->cols = gs.cols;
+    s->rows = gs.rows;
+    const int cards = gs.cols * gs.rows;
+    s->flip.assign(cards, 0.f);
+    s->owner.assign(cards, -1);
+
+    // Sorteia quais imagens do tema entram nesta partida.
+    std::vector<int> all(th.faces);
+    for (int i = 0; i < th.faces; ++i) all[i] = i + 1;
+    std::mt19937 rng(cfg.seed + 1);
+    std::shuffle(all.begin(), all.end(), rng);
+    s->image.assign(all.begin(), all.begin() + cards / 2);
+
+    auto load = [&](const std::string& file) {
+        SDL_Texture* t = IMG_LoadTexture(gfx_.r, file.c_str());
+        if (!t) std::fprintf(stderr, "Falha ao carregar %s: %s\n", file.c_str(), IMG_GetError());
+        return t;
+    };
+    s->back = load(th.dir + "/back.png");
+    char buf[16];
+    for (int img : s->image) {
+        std::snprintf(buf, sizeof buf, "/%02d.png", img);
+        s->faceTex.push_back(load(th.dir + buf));
+    }
+    if (!s->back || std::find(s->faceTex.begin(), s->faceTex.end(), nullptr) != s->faceTex.end())
+        return false;
+
+    session_ = std::move(s);
+    screen_ = Screen::Game;
+    return true;
+}
+
+void App::toMenu() {
+    session_.reset();
+    screen_ = Screen::Menu;
+}
+
+// --------------------------------------------------------------------- jogo
+
+SDL_Rect App::cardRect(int i) const {
+    const int top = 120, bottom = 50, side = 40;
+    const int availW = kW - 2 * side, availH = kH - top - bottom;
+    const int cell = std::min(availW / session_->cols, availH / session_->rows);
+    const int gap = cell / 12;
+    const int x0 = (kW - cell * session_->cols) / 2;
+    const int y0 = top + (availH - cell * session_->rows) / 2;
+    const int c = i % session_->cols, r = i / session_->cols;
+    return {x0 + c * cell + gap / 2, y0 + r * cell + gap / 2, cell - gap, cell - gap};
+}
+
+void App::flipCard(int i) {
+    Session& s = *session_;
+    const int player = s.game->currentPlayer();
+    switch (s.game->flip(i)) {
+        case memory::FlipResult::First: s.firstPick = i; break;
+        case memory::FlipResult::Match:
+            s.owner[s.firstPick] = s.owner[i] = player;
+            s.firstPick = -1;
+            if (s.game->finished()) s.finishTimer = 1.4f;
+            break;
+        case memory::FlipResult::Mismatch:
+            s.firstPick = -1;
+            s.mismatchTimer = 1.1f;
+            break;
+        case memory::FlipResult::Invalid: break;
+    }
+}
+
+void App::gameInput(const Input& in) {
+    Session& s = *session_;
+    const int n = s.game->cardCount();
+    auto move = [&](int dc, int dr) {
+        const int c = (s.cursor % s.cols + dc + s.cols) % s.cols;
+        const int r = (s.cursor / s.cols + dr + s.rows) % s.rows;
+        s.cursor = r * s.cols + c;
+    };
+    auto settle = [&] {  // dá a vez ao próximo sem esperar o tempo de memorizar
+        if (s.game->phase() == memory::Phase::Mismatch) {
+            s.game->resolveMismatch();
+            s.mismatchTimer = 0;
+        }
+    };
+    switch (in.action) {
+        case Action::Up: move(0, -1); break;
+        case Action::Down: move(0, +1); break;
+        case Action::Left: move(-1, 0); break;
+        case Action::Right: move(+1, 0); break;
+        case Action::Confirm:
+            settle();
+            flipCard(s.cursor);
+            break;
+        case Action::Click:
+            for (int i = 0; i < n; ++i) {
+                const SDL_Rect rc = cardRect(i);
+                const SDL_Point p{in.x, in.y};
+                if (!SDL_PointInRect(&p, &rc)) continue;
+                s.cursor = i;
+                settle();
+                flipCard(i);
+            }
+            break;
+        case Action::Back: case Action::Quit: toMenu(); break;
+        case Action::DebugMatch:
+        case Action::DebugMismatch: {
+            if (s.game->phase() != memory::Phase::PickFirst) break;
+            int a = -1, b = -1;
+            for (int i = 0; i < n && b < 0; ++i) {
+                if (s.game->card(i).state != memory::CardState::Hidden) continue;
+                if (a < 0) { a = i; continue; }
+                const bool same = s.game->card(i).face == s.game->card(a).face;
+                if (same == (in.action == Action::DebugMatch)) b = i;
+            }
+            if (b >= 0) { flipCard(a); flipCard(b); }
+            break;
+        }
+    }
+}
+
+void App::resultInput(const Input& in) {
+    switch (in.action) {
+        case Action::Confirm: case Action::Click:
+            if (!startGame()) toMenu();
+            break;
+        case Action::Back: case Action::Quit: toMenu(); break;
+        default: break;
+    }
+}
+
+void App::handle(const Input& in) {
+    switch (screen_) {
+        case Screen::Menu: menuInput(in); break;
+        case Screen::Game: gameInput(in); break;
+        case Screen::Result: resultInput(in); break;
+    }
+}
+
+void App::update(float dt) {
+    clock_ += dt;
+    if (screen_ != Screen::Game) return;
+    Session& s = *session_;
+    for (int i = 0; i < s.game->cardCount(); ++i) {
+        const float target = s.game->card(i).state == memory::CardState::Hidden ? 0.f : 1.f;
+        const float step = 4.5f * dt;
+        float& f = s.flip[i];
+        f = f < target ? std::min(target, f + step) : std::max(target, f - step);
+    }
+    if (s.game->phase() == memory::Phase::Mismatch) {
+        s.mismatchTimer -= dt;
+        if (s.mismatchTimer <= 0) s.game->resolveMismatch();
+    }
+    if (s.game->finished()) {
+        s.finishTimer -= dt;
+        if (s.finishTimer <= 0) screen_ = Screen::Result;
+    }
+}
+
+// ------------------------------------------------------------------ desenho
+
+void App::renderScoreboard(int y) {
+    const memory::Game& g = *session_->game;
+    const int n = g.players(), w = 210, h = 64, gap = 22;
+    const int x0 = (kW - (n * w + (n - 1) * gap)) / 2;
+    for (int p = 0; p < n; ++p) {
+        const bool active = screen_ == Screen::Game && !g.finished() && p == g.currentPlayer();
+        SDL_Rect rc{x0 + p * (w + gap), y, w, h};
+        if (active) {
+            const float pulse = 0.5f + 0.5f * std::sin(clock_ * 6.f);
+            gfx_.fillRound({rc.x - 7, rc.y - 7, rc.w + 14, rc.h + 14}, 24,
+                           {kInk.r, kInk.g, kInk.b, Uint8(150 + 105 * pulse)});
+        }
+        Color c = kPlayerColor[p];
+        if (!active && screen_ == Screen::Game) c.a = 150;
+        gfx_.fillRound(rc, 18, c);
+        gfx_.text("J" + std::to_string(p + 1), kMedium, kWhite, rc.x + 22, rc.y + h / 2, Align::Left);
+        gfx_.text(std::to_string(g.score(p)), kMedium, kWhite, rc.x + w - 22, rc.y + h / 2, Align::Right);
+    }
+}
+
+void App::renderMenu() {
+    gfx_.text("Jogo da Memória", kBig, kInk, kW / 2, 110);
+    const char* labels[3] = {"Jogadores", "Tamanho", "Tema"};
+    const GridSize gs = kSizes[settings_.size];
+    const std::string values[3] = {
+        std::to_string(settings_.players),
+        std::to_string(gs.cols) + " x " + std::to_string(gs.rows),
+        themes_[settings_.theme].name};
+    for (int row = 0; row < 3; ++row) {
+        const SDL_Rect rc = menuRowRect(row);
+        const bool sel = menuRow_ == row;
+        if (sel) gfx_.fillRound({rc.x - 5, rc.y - 5, rc.w + 10, rc.h + 10}, 28, kPlayerColor[1]);
+        gfx_.fillRound(rc, 24, sel ? kWhite : Color{255, 255, 255, 150});
+        gfx_.text(labels[row], kMedium, kInk, rc.x + 32, rc.y + rc.h / 2, Align::Left);
+        const int vx = rc.x + rc.w - 170;
+        gfx_.text(values[row], kMedium, kInk, vx, rc.y + rc.h / 2);
+        const Color ac = sel ? kPlayerColor[1] : kMuted;
+        gfx_.arrow(vx - 110, rc.y + rc.h / 2, 13, true, ac);
+        gfx_.arrow(vx + 110, rc.y + rc.h / 2, 13, false, ac);
+    }
+    // jogadores: bolinhas coloridas mostram quantos vão jogar
+    for (int p = 0; p < settings_.players; ++p) {
+        const SDL_Rect rc = menuRowRect(0);
+        gfx_.fillRound({rc.x + 256 + p * 25, rc.y + 31, 18, 18}, 9, kPlayerColor[p]);
+    }
+    const SDL_Rect pb = menuRowRect(3);
+    const bool sel = menuRow_ == 3;
+    if (sel) gfx_.fillRound({pb.x - 6, pb.y - 6, pb.w + 12, pb.h + 12}, 40, kInk);
+    gfx_.fillRound(pb, 36, kPlayerColor[2]);
+    gfx_.text("Jogar!", kMedium, kWhite, pb.x + pb.w / 2, pb.y + pb.h / 2);
+    gfx_.text("Setas: escolher e mudar     Enter ou A: confirmar     Esc ou +: sair", kSmall, kMuted,
+              kW / 2, kH - 28);
+}
+
+void App::renderGame() {
+    Session& s = *session_;
+    renderScoreboard(26);
+    const int turn = s.game->currentPlayer();
+
+    for (int i = 0; i < s.game->cardCount(); ++i) {
+        const SDL_Rect rc = cardRect(i);
+        if (i == s.cursor && !s.game->finished()) {
+            const float pulse = 0.5f + 0.5f * std::sin(clock_ * 7.f);
+            Color pc = kPlayerColor[turn];
+            pc.a = Uint8(170 + 85 * pulse);
+            gfx_.fillRound({rc.x - 8, rc.y - 8, rc.w + 16, rc.h + 16}, 26, pc);
+            gfx_.fillRound({rc.x - 3, rc.y - 3, rc.w + 6, rc.h + 6}, 21, kBg);
+        }
+        const float p = s.flip[i];
+        const float scale = std::fabs(std::cos(p * float(M_PI)));
+        const int w = std::max(2, int(rc.w * scale));
+        const SDL_Rect d{rc.x + (rc.w - w) / 2, rc.y, w, rc.h};
+        if (p < 0.5f) {
+            SDL_RenderCopy(gfx_.r, s.back, nullptr, &d);
+        } else {
+            const int owner = s.owner[i];
+            gfx_.fillRound(d, 20, owner >= 0 ? kPlayerColor[owner] : kEdge);
+            gfx_.fillRound({d.x + 4, d.y + 4, d.w - 8, d.h - 8}, 17, kWhite);
+            const int inset = rc.w / 8;
+            const SDL_Rect img{d.x + inset * w / rc.w, d.y + inset, w - 2 * inset * w / rc.w,
+                               d.h - 2 * inset};
+            SDL_RenderCopy(gfx_.r, s.faceTex[s.game->card(i).face], nullptr, &img);
+        }
+    }
+    gfx_.text("Vez do Jogador " + std::to_string(turn + 1), kSmall, kPlayerColor[turn], 40, kH - 26,
+              Align::Left);
+    gfx_.text("Jogadas: " + std::to_string(s.game->moves()), kSmall, kMuted, kW - 40, kH - 26,
+              Align::Right);
+    gfx_.text("Setas: mover   Enter ou A: virar   B: menu", kSmall, kMuted, kW / 2, kH - 26);
+}
+
+void App::renderResult() {
+    const memory::Game& g = *session_->game;
+    gfx_.text("Fim de jogo!", kBig, kInk, kW / 2, 120);
+    const auto win = g.winners();
+    std::string msg;
+    if (g.players() == 1) msg = "Você achou todos os pares em " + std::to_string(g.moves()) + " jogadas!";
+    else if (win.size() == 1) msg = "Parabéns, Jogador " + std::to_string(win[0] + 1) + "!";
+    else {
+        msg = "Empate entre ";
+        for (size_t i = 0; i < win.size(); ++i)
+            msg += (i ? (i + 1 == win.size() ? " e " : ", ") : "") + std::string("J") + std::to_string(win[i] + 1);
+        msg += "!";
+    }
+    gfx_.text(msg, kMedium, kPlayerColor[win[0]], kW / 2, 240);
+    renderScoreboard(330);
+    gfx_.text("Enter ou A: jogar de novo     B: menu", kSmall, kMuted, kW / 2, kH - 60);
+}
+
+void App::render() {
+    gfx_.color(kBg);
+    SDL_RenderClear(gfx_.r);
+    switch (screen_) {
+        case Screen::Menu: renderMenu(); break;
+        case Screen::Game: renderGame(); break;
+        case Screen::Result: renderResult(); break;
+    }
+    if (shotPending_) saveShot();
+    SDL_RenderPresent(gfx_.r);
+}
+
+void App::run() {
+    Uint64 last = SDL_GetPerformanceCounter();
+    while (running_) {
+        const Uint64 now = SDL_GetPerformanceCounter();
+        const float dt = std::min(0.1f, float(now - last) / float(SDL_GetPerformanceFrequency()));
+        last = now;
+        pumpEvents();
+        pumpScript(dt);
+        std::vector<Input> batch;
+        batch.swap(queue_);
+        for (const auto& in : batch) {
+            handle(in);
+            if (!running_) break;
+        }
+        update(dt);
+        render();
+    }
+}
+
+}  // namespace
+
+int main(int, char**) {
+    App app;
+    if (!app.init()) return 1;
+    app.run();
+    return 0;
+}

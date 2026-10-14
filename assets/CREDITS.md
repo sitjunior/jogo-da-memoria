@@ -10,3 +10,6 @@ Os versos das cartas (`back.png`) foram gerados para este projeto.
 Obs.: a licença CC BY-SA exige dar crédito (este arquivo) e que as imagens
 adaptadas sejam distribuídas sob a mesma licença. Para uso pessoal não há
 nenhuma obrigação adicional.
+
+A fonte **Fredoka** (assets/fonts/Fredoka.ttf) é de The Fredoka Project Authors,
+licenciada sob a SIL Open Font License 1.1 (assets/fonts/OFL-Fredoka.txt).
