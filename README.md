@@ -93,7 +93,8 @@ Sem dispositivo de áudio, o jogo segue mudo.
 
 - Com um só controle (ex.: portátil), o jogo vai direto para a partida e todos dividem o controle,
   mesmo com 2 a 4 jogadores. A tela "Controles" só aparece quando há 2 ou mais controles.
-- Botões A e B invertidos: aperte **-** no menu para trocar.
+- Botões A e B: no Switch o SDL os entrega trocados, então o jogo já os inverte por padrão. Se ainda
+  vierem ao contrário, aperte **-** no menu para inverter de novo.
 - Para ver o que o jogo recebe, abra o hbmenu, aperte **Y** (netloader) e rode no Mac:
 
       $DEVKITPRO/tools/bin/nxlink -s -a <IP do Switch> jogo-da-memoria.nro

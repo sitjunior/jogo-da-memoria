@@ -26,6 +26,14 @@
 
 namespace {
 
+// No Switch o SDL entrega A e B trocados em relação aos rótulos do controle Nintendo
+// (confirmado no aparelho), então a troca já vem ligada por padrão. No Mac não.
+#ifdef __SWITCH__
+constexpr bool kSwapABDefault = true;
+#else
+constexpr bool kSwapABDefault = false;
+#endif
+
 constexpr float kPi = 3.14159265358979f;  // M_PI não existe em todo toolchain (ex.: newlib estrito)
 
 constexpr int kW = 1280;  // resolução lógica (a do Switch portátil)
@@ -406,7 +414,7 @@ private:
     std::vector<SDL_GameController*> pads_;
     std::vector<SDL_Joystick*> joys_;  // joysticks que o SDL não reconhece como controle
     Audio audio_;
-    bool swapAB_ = false;
+    bool swapAB_ = kSwapABDefault;
     bool debugInput_ = false;
     std::unordered_map<int, std::array<int, 2>> stick_;  // por dispositivo
     std::unordered_map<int, int> padNumber_;             // id -> "Controle N"
@@ -1167,10 +1175,11 @@ void App::renderMenu() {
     gfx_.text(!audio_.available() ? "Sem áudio" : audio_.musicOn() ? "Música: ligada (M ou X)"
                                                                    : "Música: desligada (M ou X)",
               kSmall, kMuted, kW - 30, 30, Align::Right);
-    gfx_.text(swapAB_ ? "A e B trocados" : "", kSmall, kMuted, 30, 30, Align::Left);
+    gfx_.text(swapAB_ != kSwapABDefault ? "A e B invertidos (tecla -)" : "", kSmall, kMuted, 30, 30,
+              Align::Left);
     gfx_.text("Setas: escolher e mudar     Enter ou A: confirmar     Esc ou +: sair", kSmall, kMuted,
               kW / 2, kH - 52);
-    gfx_.text("Botões invertidos? Aperte  -  para trocar A e B", kSmall, kMuted, kW / 2, kH - 22);
+    gfx_.text("A e B ao contrário? Aperte  -  para inverter", kSmall, kMuted, kW / 2, kH - 22);
 }
 
 void App::renderGame() {
