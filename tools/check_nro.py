@@ -26,7 +26,8 @@ def main(path):
     print(f"  RomFS : {rsz} bytes" + ("" if rsz else "  <-- FALTA (jogo ficará sem imagens)"))
     if isz:
         icon = data[size + io: size + io + isz]
-        print(f"  ícone é JPEG: {icon[:2] == b'\xff\xd8'}")
+        is_jpeg = icon[:2] == b"\xff\xd8"
+        print("  ícone é JPEG: " + str(is_jpeg))
     if nsz:
         nacp = data[size + no: size + no + nsz]
         name = nacp[0:0x200].split(b"\0")[0].decode("utf-8", "replace")
