@@ -1101,7 +1101,9 @@ void App::assignInput(const Input& in) {
             return;
         default: return;
     }
-    if (std::find(slots_.begin(), slots_.end(), kDeviceNone) == slots_.end()) finishAssign();
+    // Mesmo com todas as vagas ocupadas, o jogo só começa pelo botão "Começar agora":
+    // aqui só deixamos o botão em foco para o próximo A.
+    if (std::find(slots_.begin(), slots_.end(), kDeviceNone) == slots_.end()) assignOnButton_ = true;
 }
 
 void App::renderAssign() {
@@ -1133,6 +1135,9 @@ void App::renderAssign() {
         gfx_.text(std::to_string(freeSlots) + (freeSlots == 1 ? " vaga livre joga" : " vagas livres jogam") +
                       " com qualquer controle",
                   kSmall, kMuted, kW / 2, btn.y + btn.h + 24);
+    else
+        gfx_.text("Todos entraram! Aperte Começar agora para jogar", kSmall, kPlayerColor[2], kW / 2,
+                  btn.y + btn.h + 24);
     gfx_.text("A, Enter ou clique: entrar     Baixo e depois A (ou clique, ou +): começar agora", kSmall,
               kMuted, kW / 2, kH - 52);
     gfx_.text("Y ou Tab: o resto joga neste dispositivo     B ou Backspace: sair da vaga     Esc: menu",
