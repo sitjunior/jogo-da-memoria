@@ -26,8 +26,8 @@
 
 namespace {
 
-// No Switch o SDL entrega A e B trocados em relação aos rótulos do controle Nintendo
-// (confirmado no aparelho), então a troca é fixa nele. No Mac não troca.
+// No Switch o SDL entrega A e B (e também X e Y) trocados em relação aos rótulos do controle
+// Nintendo (confirmado no aparelho), então a troca é fixa nele. No Mac não troca.
 #ifdef __SWITCH__
 constexpr bool kSwapAB = true;
 #else
@@ -439,7 +439,7 @@ private:
     int inputDevices() const;
     void openJoystick(int index);
     void addPad(SDL_GameController* p);
-    void buttonEvent(int dev, int sdlButton);
+    void buttonEvent(int dev, int sdlButton, bool labelSwapped);
     void stickEvent(int dev, bool horizontal, int value);
     std::string deviceName(int id);
     bool startGame();
@@ -559,7 +559,10 @@ int App::inputDevices() const {
     return n;
 }
 
-void App::buttonEvent(int dev, int btn) {
+// `labelSwapped`: o botão veio da API de controle do SDL, que no Nintendo troca A/B e X/Y.
+// Joysticks "crus" já trazem a numeração física e não sofrem a troca.
+void App::buttonEvent(int dev, int btn, bool labelSwapped) {
+    const bool swap = kSwapAB && labelSwapped;
     if (debugInput_) std::fprintf(stderr, "[controle %d] botão %d\n", dev, btn);
     auto push = [&](Action a) { queue_.push_back({a, dev, 0, 0}); };
     switch (btn) {
@@ -567,9 +570,10 @@ void App::buttonEvent(int dev, int btn) {
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN: push(Action::Down); break;
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT: push(Action::Left); break;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: push(Action::Right); break;
-        case SDL_CONTROLLER_BUTTON_A: push(kSwapAB ? Action::Back : Action::Confirm); break;
-        case SDL_CONTROLLER_BUTTON_B: push(kSwapAB ? Action::Confirm : Action::Back); break;
-        case SDL_CONTROLLER_BUTTON_Y: push(Action::Fill); break;
+        case SDL_CONTROLLER_BUTTON_A: push(swap ? Action::Back : Action::Confirm); break;
+        case SDL_CONTROLLER_BUTTON_B: push(swap ? Action::Confirm : Action::Back); break;
+        case SDL_CONTROLLER_BUTTON_X: if (swap) push(Action::Fill); break;   // o Y físico
+        case SDL_CONTROLLER_BUTTON_Y: if (!swap) push(Action::Fill); break;
         case SDL_CONTROLLER_BUTTON_START: push(Action::Quit); break;
         default: break;
     }
@@ -654,7 +658,7 @@ void App::pumpEvents() {
                 }
                 break;
             case SDL_CONTROLLERBUTTONDOWN:
-                buttonEvent(e.cbutton.which, e.cbutton.button);
+                buttonEvent(e.cbutton.which, e.cbutton.button, true);
                 break;
             case SDL_CONTROLLERAXISMOTION:
                 if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) stickEvent(e.caxis.which, true, e.caxis.value);
@@ -671,7 +675,7 @@ void App::pumpEvents() {
                         SDL_CONTROLLER_BUTTON_DPAD_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_DOWN};
                     if (debugInput_) std::fprintf(stderr, "[joystick %d] botão cru %d\n", int(e.jbutton.which), int(e.jbutton.button));
                     if (e.jbutton.button < 16 && kNx[e.jbutton.button] >= 0)
-                        buttonEvent(e.jbutton.which, kNx[e.jbutton.button]);
+                        buttonEvent(e.jbutton.which, kNx[e.jbutton.button], false);
                 }
                 break;
             case SDL_JOYAXISMOTION:
@@ -680,10 +684,10 @@ void App::pumpEvents() {
                 break;
             case SDL_JOYHATMOTION:
                 if (!SDL_GameControllerFromInstanceID(e.jhat.which)) {
-                    if (e.jhat.value & SDL_HAT_UP) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_UP);
-                    if (e.jhat.value & SDL_HAT_DOWN) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-                    if (e.jhat.value & SDL_HAT_LEFT) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-                    if (e.jhat.value & SDL_HAT_RIGHT) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+                    if (e.jhat.value & SDL_HAT_UP) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_UP, false);
+                    if (e.jhat.value & SDL_HAT_DOWN) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_DOWN, false);
+                    if (e.jhat.value & SDL_HAT_LEFT) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_LEFT, false);
+                    if (e.jhat.value & SDL_HAT_RIGHT) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, false);
                 }
                 break;
             default: break;
