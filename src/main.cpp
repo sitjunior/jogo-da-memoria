@@ -1023,7 +1023,11 @@ bool App::allowed(const Input& in) const {
         default: break;
     }
     const int owner = slots_[session_->game->currentPlayer()];
-    return owner == kDeviceAny || owner == in.device;
+    if (owner == in.device) return true;
+    if (owner != kDeviceAny) return false;  // a vez é de outro dispositivo: bloqueado
+    // Vaga livre: serve qualquer dispositivo que não seja dono de OUTRA vaga. Assim quem já
+    // entrou como Jogador 1 não joga na vez do Jogador 2.
+    return std::find(slots_.begin(), slots_.end(), in.device) == slots_.end();
 }
 
 void App::requestStart(bool reuseSlots, int starter) {
@@ -1156,7 +1160,7 @@ void App::renderAssign() {
     gfx_.text("Começar agora", kMedium, kWhite, btn.x + btn.w / 2, btn.y + btn.h / 2);
     if (freeSlots > 0)
         gfx_.text(std::to_string(freeSlots) + (freeSlots == 1 ? " vaga livre joga" : " vagas livres jogam") +
-                      " com qualquer controle",
+                      " com qualquer outro controle",
                   kSmall, kMuted, kW / 2, btn.y + btn.h + 24);
     else
         gfx_.text("Todos entraram! Aperte Começar agora para jogar", kSmall, kPlayerColor[2], kW / 2,
@@ -1309,7 +1313,12 @@ void App::renderGame() {
         }
     }
     std::string who = "Vez do Jogador " + std::to_string(turn + 1);
-    if (s.game->players() > 1) who += " (" + deviceName(slots_[turn]) + ")";
+    if (s.game->players() > 1) {
+        // Vaga livre ao lado de jogadores com dispositivo próprio: só os "outros" jogam nela.
+        const bool othersOwn = std::any_of(slots_.begin(), slots_.end(), [](int d) { return d >= 0 || d == kDeviceKeyboard || d == kDeviceMouse; });
+        who += " (" + (slots_[turn] == kDeviceAny && othersOwn ? std::string("qualquer outro controle")
+                                                              : deviceName(slots_[turn])) + ")";
+    }
     gfx_.text(who, kSmall, kPlayerColor[turn], kW / 2, kH - 26);
     gfx_.text("Jogadas: " + std::to_string(s.game->moves()), kSmall, kMuted, kW - 40, kH - 26,
               Align::Right);

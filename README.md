@@ -37,7 +37,8 @@ com a vaga do Jogador 1.
 - Na partida, só o controle do jogador da vez mexe no cursor; os outros são ignorados.
 - O jogo **nunca começa sozinho**: mesmo com todos já dentro, é preciso usar o botão **Começar agora**
   na parte de baixo da tela (pode ser antes de todos entrarem): clique ou toque nele, ou aperte **Baixo** e depois **A**/Enter.
-  As vagas que ninguém assumiu jogam com qualquer dispositivo.
+  As vagas que ninguém assumiu jogam com qualquer dispositivo **que ainda não seja de outro jogador**:
+  quem já entrou como Jogador 1 não consegue jogar na vez do Jogador 2.
 - Faltou controle? Aperte **Y** (ou **Tab**) e o resto dos jogadores divide aquele controle.
 - **B** (ou Backspace) libera a vaga. No computador, **Esc** volta ao menu.
 - **No Switch, + ou - saem do jogo** em qualquer tela e de qualquer controle (inclusive de quem não é
