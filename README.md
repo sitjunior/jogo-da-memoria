@@ -23,7 +23,7 @@ Linux (Debian/Ubuntu): `sudo apt install cmake libsdl2-dev libsdl2-image-dev lib
 | Mover / escolher | setas ou WASD | direcional ou analógico esquerdo |
 | Confirmar / virar carta | Enter ou espaço | A |
 | Voltar ao menu | Backspace | B |
-| Sair (no menu) | Esc | + |
+| Sair do jogo | Esc | + ou - (no Switch) |
 | Tela cheia | F ou F11 | – |
 
 O mouse (ou o toque na tela do Switch) também funciona: clique na carta ou nas opções do menu.
@@ -36,10 +36,12 @@ com a vaga do Jogador 1.
 
 - Na partida, só o controle do jogador da vez mexe no cursor; os outros são ignorados.
 - O jogo **nunca começa sozinho**: mesmo com todos já dentro, é preciso usar o botão **Começar agora**
-  na parte de baixo da tela (pode ser antes de todos entrarem): clique ou toque nele, aperte **+** no controle, ou aperte **Baixo** e depois **A**/Enter.
+  na parte de baixo da tela (pode ser antes de todos entrarem): clique ou toque nele, ou aperte **Baixo** e depois **A**/Enter.
   As vagas que ninguém assumiu jogam com qualquer dispositivo.
 - Faltou controle? Aperte **Y** (ou **Tab**) e o resto dos jogadores divide aquele controle.
-- **B** (ou Backspace) libera a vaga. **Esc** volta ao menu (no controle, **+** aqui é "começar agora").
+- **B** (ou Backspace) libera a vaga. No computador, **Esc** volta ao menu.
+- **No Switch, + ou - saem do jogo** em qualquer tela e de qualquer controle (inclusive de quem não é
+  o jogador da vez). Para começar a partida, use só o botão **Começar agora**.
 - Se um controle desconectar no meio da partida, o jogo pausa e pede para atribuir de novo,
   sem perder a partida.
 - Sozinho (1 jogador), qualquer controle serve.

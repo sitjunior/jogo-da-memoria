@@ -34,6 +34,13 @@ constexpr bool kSwapAB = true;
 constexpr bool kSwapAB = false;
 #endif
 
+// Texto de dica para sair, conforme a plataforma.
+#ifdef __SWITCH__
+const char* const kExitHint = "+ ou -: sair do jogo";
+#else
+const char* const kExitHint = "Esc: sair";
+#endif
+
 constexpr float kPi = 3.14159265358979f;  // M_PI não existe em todo toolchain (ex.: newlib estrito)
 
 constexpr int kW = 1280;  // resolução lógica (a do Switch portátil)
@@ -331,6 +338,7 @@ private:
 
 enum class Action {
     Up, Down, Left, Right, Confirm, Back, Quit, Click,
+    ExitApp,        // + ou - no Switch: sai do jogo, de qualquer tela e de qualquer controle
     Fill,           // na tela de controles: este controle fica com todas as vagas livres
     DebugMatch,     // só pelo roteiro de teste (MEMORIA_SCRIPT)
     DebugMismatch,  // idem
@@ -599,7 +607,13 @@ void App::buttonEvent(int dev, int btn, bool labelSwapped) {
         case SDL_CONTROLLER_BUTTON_B: push(swap ? Action::Confirm : Action::Back); break;
         case SDL_CONTROLLER_BUTTON_X: if (swap) push(Action::Fill); break;   // o Y físico
         case SDL_CONTROLLER_BUTTON_Y: if (!swap) push(Action::Fill); break;
+#ifdef __SWITCH__
+        // No Switch, + e - saem do jogo de qualquer tela, mesmo com os controles soltos.
+        case SDL_CONTROLLER_BUTTON_START:
+        case SDL_CONTROLLER_BUTTON_BACK: push(Action::ExitApp); break;
+#else
         case SDL_CONTROLLER_BUTTON_START: push(Action::Quit); break;
+#endif
         default: break;
     }
 }
@@ -746,6 +760,15 @@ void App::pumpScript(float dt) {
         case 'k': scriptDevice_ = kDeviceKeyboard; break;
         case 'o': scriptDevice_ = kDeviceMouse; break;
         case 'z': padRemoved(scriptDevice_); break;
+        case '+': case '-': {
+            SDL_Event ev;
+            SDL_zero(ev);
+            ev.type = SDL_CONTROLLERBUTTONDOWN;
+            ev.cbutton.which = scriptDevice_;
+            ev.cbutton.button = ch == '+' ? SDL_CONTROLLER_BUTTON_START : SDL_CONTROLLER_BUTTON_BACK;
+            SDL_PushEvent(&ev);
+            break;
+        }
         case 'w': scriptWait_ = 1.6f; break;
         case 's': shotPending_ = true; break;
         case 'q': running_ = false; break;
@@ -938,7 +961,7 @@ void App::gameInput(const Input& in) {
             }
             break;
         case Action::Back: case Action::Quit: toMenu(); break;
-        case Action::Fill: break;
+        case Action::Fill: case Action::ExitApp: break;
         case Action::DebugMatch:
         case Action::DebugMismatch: {
             if (s.game->phase() != memory::Phase::PickFirst) break;
@@ -991,7 +1014,7 @@ std::string App::deviceName(int id) {
     }
 }
 
-// Durante a partida, só o dispositivo do jogador da vez manda. Sair (Esc ou +) vale
+// Durante a partida, só o dispositivo do jogador da vez manda. Voltar ao menu (Esc) vale
 // para todos; no menu, na atribuição e no resultado qualquer dispositivo vale.
 bool App::allowed(const Input& in) const {
     if (screen_ != Screen::Game || !session_) return true;
@@ -1094,11 +1117,7 @@ void App::assignInput(const Input& in) {
                 toMenu();
             }
             return;
-        case Action::Quit:
-            // + no controle começa o jogo; Esc no teclado volta ao menu.
-            if (in.device >= 0) finishAssign();
-            else toMenu();
-            return;
+        case Action::Quit: toMenu(); return;
         default: return;
     }
     // Mesmo com todas as vagas ocupadas, o jogo só começa pelo botão "Começar agora":
@@ -1109,9 +1128,13 @@ void App::assignInput(const Input& in) {
 void App::renderAssign() {
     const int n = settings_.players;
     gfx_.text("Controles", kBig, kInk, kW / 2, 90);
-    gfx_.text(session_ ? "Um controle desconectou: quem ficou sem controle entra de novo"
-                       : "Até 4 jogadores. Cada um usa o seu: A no controle, Enter no teclado ou clique no mouse",
-              kSmall, kMuted, kW / 2, 164);
+#ifdef __SWITCH__
+    const char* rule = "Até 4 jogadores. Cada um usa o seu controle: aperte A para entrar";
+#else
+    const char* rule = "Até 4 jogadores. Cada um usa o seu: A no controle, Enter no teclado ou clique no mouse";
+#endif
+    gfx_.text(session_ ? "Um controle desconectou: quem ficou sem controle entra de novo" : rule, kSmall,
+              kMuted, kW / 2, 164);
     const auto firstFree = std::find(slots_.begin(), slots_.end(), kDeviceNone);
     int freeSlots = 0;
     for (int d : slots_) freeSlots += d == kDeviceNone;
@@ -1138,13 +1161,24 @@ void App::renderAssign() {
     else
         gfx_.text("Todos entraram! Aperte Começar agora para jogar", kSmall, kPlayerColor[2], kW / 2,
                   btn.y + btn.h + 24);
-    gfx_.text("A, Enter ou clique: entrar     Baixo e depois A (ou clique, ou +): começar agora", kSmall,
-              kMuted, kW / 2, kH - 52);
+#ifdef __SWITCH__
+    gfx_.text("A ou toque: entrar     Baixo e depois A (ou toque): começar agora", kSmall, kMuted, kW / 2,
+              kH - 52);
+    gfx_.text("Y: o resto joga neste controle     B: sair da vaga     + ou -: sair do jogo", kSmall, kMuted,
+              kW / 2, kH - 24);
+#else
+    gfx_.text("A, Enter ou clique: entrar     Baixo e depois A (ou clique): começar agora", kSmall, kMuted,
+              kW / 2, kH - 52);
     gfx_.text("Y ou Tab: o resto joga neste dispositivo     B ou Backspace: sair da vaga     Esc: menu",
               kSmall, kMuted, kW / 2, kH - 24);
+#endif
 }
 
 void App::handle(const Input& in) {
+    if (in.action == Action::ExitApp) {
+        running_ = false;
+        return;
+    }
     if (!allowed(in)) return;
     if (screen_ != Screen::Game) {
         switch (in.action) {
@@ -1240,8 +1274,8 @@ void App::renderMenu() {
     if (sel) gfx_.fillRound({pb.x - 6, pb.y - 6, pb.w + 12, pb.h + 12}, 40, kInk);
     gfx_.fillRound(pb, 36, kPlayerColor[2]);
     gfx_.text("Jogar!", kMedium, kWhite, pb.x + pb.w / 2, pb.y + pb.h / 2);
-    gfx_.text("Setas: escolher e mudar     Enter ou A: confirmar     Esc ou +: sair", kSmall, kMuted,
-              kW / 2, kH - 28);
+    gfx_.text(std::string("Setas: escolher e mudar     Enter ou A: confirmar     ") + kExitHint, kSmall,
+              kMuted, kW / 2, kH - 28);
 }
 
 void App::renderGame() {
@@ -1279,7 +1313,8 @@ void App::renderGame() {
     gfx_.text(who, kSmall, kPlayerColor[turn], kW / 2, kH - 26);
     gfx_.text("Jogadas: " + std::to_string(s.game->moves()), kSmall, kMuted, kW - 40, kH - 26,
               Align::Right);
-    gfx_.text("A: virar   B: menu", kSmall, kMuted, 40, kH - 26, Align::Left);
+    gfx_.text(std::string("A: virar   B: menu") + (kExitHint[0] == '+' ? "   + ou -: sair" : ""), kSmall,
+              kMuted, 40, kH - 26, Align::Left);
 }
 
 void App::renderResult() {
@@ -1297,7 +1332,9 @@ void App::renderResult() {
     }
     gfx_.text(msg, kMedium, kPlayerColor[win[0]], kW / 2, 240);
     renderScoreboard(330);
-    gfx_.text("Enter ou A: jogar de novo     B: menu", kSmall, kMuted, kW / 2, kH - 60);
+    gfx_.text(std::string("Enter ou A: jogar de novo     B: menu") +
+                  (kExitHint[0] == '+' ? "     + ou -: sair" : ""),
+              kSmall, kMuted, kW / 2, kH - 60);
 }
 
 void App::render() {
