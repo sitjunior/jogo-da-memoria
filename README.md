@@ -49,3 +49,32 @@ com a vaga do Jogador 1.
 
 Crie `assets/themes/<nome>/` com 6 ou mais faces (`01.png`, `02.png`, …) e `back.png`,
 de preferência 256x256 com fundo transparente. O tema aparece sozinho no menu.
+
+## Compilar para o Nintendo Switch (homebrew)
+
+Gera um `jogo-da-memoria.nro` com todos os assets embutidos (RomFS).
+
+1. Instale o devkitPro e o gerenciador `dkp-pacman` no Mac: baixe o instalador `.pkg` em
+   https://github.com/devkitPro/pacman/releases e abra.
+2. Instale o toolchain e as bibliotecas:
+
+       sudo dkp-pacman -Sy
+       sudo dkp-pacman -S switch-dev switch-sdl2 switch-sdl2_image switch-sdl2_ttf switch-pkg-config
+
+3. Compile (na pasta do projeto):
+
+       export DEVKITPRO=/opt/devkitpro
+       export DEVKITA64=$DEVKITPRO/devkitA64
+       make
+
+   Para recompilar do zero: `make clean && make`.
+
+4. Copie para o cartão SD do Switch:
+
+       /switch/jogo-da-memoria/jogo-da-memoria.nro
+
+   Abra pelo Homebrew Menu (álbum, segurando R). Alternativa sem tirar o cartão: no hbmenu
+   aperte Y (netloader) e rode `$DEVKITPRO/tools/bin/nxlink -a <IP do Switch> jogo-da-memoria.nro`.
+
+Os assets ficam dentro do `.nro`. Se preferir, também são procurados em
+`sdmc:/switch/jogo-da-memoria/assets` e ao lado do `.nro`.

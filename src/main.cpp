@@ -20,7 +20,13 @@
 
 #include "game.hpp"
 
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
+
 namespace {
+
+constexpr float kPi = 3.14159265358979f;  // M_PI não existe em todo toolchain (ex.: newlib estrito)
 
 constexpr int kW = 1280;  // resolução lógica (a do Switch portátil)
 constexpr int kH = 720;
@@ -572,8 +578,12 @@ bool App::startGame() {
     const GridSize gs = kSizes[settings_.size];
     auto s = std::make_unique<Session>();
 
-    std::random_device rd;
-    memory::Config cfg{gs.rows, gs.cols, settings_.players, rd() ^ std::uint32_t(std::time(nullptr))};
+    // std::random_device não é confiável no toolchain do Switch; o relógio de alta
+    // resolução dá semente suficiente para embaralhar cartas.
+    const Uint64 tick = SDL_GetPerformanceCounter();
+    const std::uint32_t seed =
+        std::uint32_t(tick ^ (tick >> 32) ^ Uint64(std::time(nullptr)));
+    memory::Config cfg{gs.rows, gs.cols, settings_.players, seed};
     s->game = std::make_unique<memory::Game>(cfg);
     s->cols = gs.cols;
     s->rows = gs.rows;
@@ -917,7 +927,7 @@ void App::renderGame() {
             gfx_.fillRound({rc.x - 3, rc.y - 3, rc.w + 6, rc.h + 6}, 21, kBg);
         }
         const float p = s.flip[i];
-        const float scale = std::fabs(std::cos(p * float(M_PI)));
+        const float scale = std::fabs(std::cos(p * kPi));
         const int w = std::max(2, int(rc.w * scale));
         const SDL_Rect d{rc.x + (rc.w - w) / 2, rc.y, w, rc.h};
         if (p < 0.5f) {
@@ -993,8 +1003,17 @@ void App::run() {
 }  // namespace
 
 int main(int, char**) {
-    App app;
-    if (!app.init()) return 1;
-    app.run();
-    return 0;
+#ifdef __SWITCH__
+    romfsInit();  // monta romfs:/ (os assets embutidos no .nro)
+#endif
+    int rc = 0;
+    {
+        App app;
+        if (!app.init()) rc = 1;
+        else app.run();
+    }  // o App precisa ser destruído antes de desmontar o romfs
+#ifdef __SWITCH__
+    romfsExit();
+#endif
+    return rc;
 }
