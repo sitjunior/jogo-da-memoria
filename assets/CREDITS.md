@@ -13,3 +13,6 @@ nenhuma obrigação adicional.
 
 A fonte **Fredoka** (assets/fonts/Fredoka.ttf) é de The Fredoka Project Authors,
 licenciada sob a SIL Open Font License 1.1 (assets/fonts/OFL-Fredoka.txt).
+
+A música e os efeitos sonoros (assets/audio) foram sintetizados por tools/make_audio.py
+e são originais deste projeto.

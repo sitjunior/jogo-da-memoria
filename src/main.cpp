@@ -202,10 +202,140 @@ private:
     }
 };
 
+// -------------------------------------------------------------------- áudio
+
+enum class Sfx { Flip, Match, Wrong, Win, Click, Count };
+
+// Mixer mínimo: carrega WAVs, converte para o formato do dispositivo e mistura música
+// (em loop) com até 8 efeitos ao mesmo tempo. Se o áudio falhar, o jogo segue mudo.
+class Audio {
+public:
+    ~Audio() { shutdown(); }
+
+    bool init(const std::string& dir) {
+        SDL_AudioSpec want{};
+        want.freq = 44100;
+        want.format = AUDIO_S16SYS;
+        want.channels = 2;
+        want.samples = 1024;
+        want.callback = &Audio::callback;
+        want.userdata = this;
+        dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &spec_, 0);
+        if (!dev_) {
+            std::fprintf(stderr, "Áudio indisponível: %s\n", SDL_GetError());
+            return false;
+        }
+        bool ok = load(dir + "/music.wav", music_);
+        const char* names[int(Sfx::Count)] = {"flip", "match", "wrong", "win", "click"};
+        for (int i = 0; i < int(Sfx::Count); ++i)
+            ok = load(dir + "/" + names[i] + ".wav", sfx_[i]) && ok;
+        if (!ok) std::fprintf(stderr, "Alguns arquivos de áudio não carregaram (%s)\n", dir.c_str());
+        SDL_PauseAudioDevice(dev_, 0);
+        return true;
+    }
+
+    void shutdown() {
+        if (dev_) SDL_CloseAudioDevice(dev_);
+        dev_ = 0;
+    }
+
+    void play(Sfx s) {
+        if (!dev_ || sfx_[int(s)].pcm.empty()) return;
+        SDL_LockAudioDevice(dev_);
+        Voice* slot = &voices_[0];
+        for (auto& v : voices_)
+            if (!v.clip) { slot = &v; break; }
+        slot->clip = &sfx_[int(s)];
+        slot->pos = 0;
+        SDL_UnlockAudioDevice(dev_);
+    }
+
+    bool toggleMusic() {
+        if (!dev_) return false;
+        SDL_LockAudioDevice(dev_);
+        musicOn_ = !musicOn_;
+        SDL_UnlockAudioDevice(dev_);
+        return musicOn_;
+    }
+    bool available() const { return dev_ != 0; }
+    bool musicOn() const { return musicOn_; }
+
+private:
+    struct Clip {
+        std::vector<Uint8> pcm;
+    };
+    struct Voice {
+        const Clip* clip = nullptr;
+        size_t pos = 0;
+    };
+    static constexpr int kMusicVolume = 48;  // de 128
+    static constexpr int kSfxVolume = 60;
+
+    SDL_AudioDeviceID dev_ = 0;
+    SDL_AudioSpec spec_{};
+    Clip music_;
+    Clip sfx_[int(Sfx::Count)];
+    Voice voices_[8];
+    size_t musicPos_ = 0;
+    bool musicOn_ = true;
+
+    bool load(const std::string& file, Clip& out) {
+        SDL_AudioSpec ws;
+        Uint8* buf = nullptr;
+        Uint32 len = 0;
+        if (!SDL_LoadWAV(file.c_str(), &ws, &buf, &len)) {
+            std::fprintf(stderr, "WAV não carregou: %s (%s)\n", file.c_str(), SDL_GetError());
+            return false;
+        }
+        SDL_AudioStream* st = SDL_NewAudioStream(ws.format, ws.channels, ws.freq, spec_.format,
+                                                 spec_.channels, spec_.freq);
+        bool ok = st && SDL_AudioStreamPut(st, buf, int(len)) == 0 && SDL_AudioStreamFlush(st) == 0;
+        if (ok) {
+            const int n = SDL_AudioStreamAvailable(st);
+            out.pcm.resize(size_t(n));
+            ok = SDL_AudioStreamGet(st, out.pcm.data(), n) == n;
+        }
+        if (st) SDL_FreeAudioStream(st);
+        SDL_FreeWAV(buf);
+        return ok;
+    }
+
+    static void callback(void* self, Uint8* stream, int len) {
+        static_cast<Audio*>(self)->mix(stream, len);
+    }
+
+    void mix(Uint8* stream, int len) {
+        SDL_memset(stream, 0, size_t(len));
+        if (musicOn_ && !music_.pcm.empty()) {
+            int off = 0;
+            while (off < len) {
+                const size_t left = music_.pcm.size() - musicPos_;
+                const int n = int(std::min<size_t>(size_t(len - off), left));
+                SDL_MixAudioFormat(stream + off, music_.pcm.data() + musicPos_, spec_.format,
+                                   Uint32(n), kMusicVolume);
+                off += n;
+                musicPos_ += size_t(n);
+                if (musicPos_ >= music_.pcm.size()) musicPos_ = 0;
+            }
+        }
+        for (auto& v : voices_) {
+            if (!v.clip) continue;
+            const size_t left = v.clip->pcm.size() - v.pos;
+            const int n = int(std::min<size_t>(size_t(len), left));
+            SDL_MixAudioFormat(stream, v.clip->pcm.data() + v.pos, spec_.format, Uint32(n),
+                               kSfxVolume);
+            v.pos += size_t(n);
+            if (v.pos >= v.clip->pcm.size()) v.clip = nullptr;
+        }
+    }
+};
+
 // ------------------------------------------------------------------- entrada
 
 enum class Action {
     Up, Down, Left, Right, Confirm, Back, Quit, Click,
+    ToggleMusic,    // M no teclado, X no controle
+    SwapButtons,    // - no controle: troca A e B (caso o SDL entregue invertidos)
     Fill,           // na tela de controles: este controle fica com todas as vagas livres
     DebugMatch,     // só pelo roteiro de teste (MEMORIA_SCRIPT)
     DebugMismatch,  // idem
@@ -237,6 +367,7 @@ struct Session {
     int firstPick = -1;
     float mismatchTimer = 0;
     float finishTimer = 0;
+    float wrongTimer = 0;  // atraso até tocar o som de erro (depois da carta virar)
 
     Session() = default;
     Session(const Session&) = delete;
@@ -273,6 +404,10 @@ private:
     std::unique_ptr<Session> session_;
     bool running_ = true;
     std::vector<SDL_GameController*> pads_;
+    std::vector<SDL_Joystick*> joys_;  // joysticks que o SDL não reconhece como controle
+    Audio audio_;
+    bool swapAB_ = false;
+    bool debugInput_ = false;
     std::unordered_map<int, std::array<int, 2>> stick_;  // por dispositivo
     std::unordered_map<int, int> padNumber_;             // id -> "Controle N"
     int nextPadNumber_ = 1;
@@ -304,6 +439,10 @@ private:
     void requestStart(bool reuseSlots, int starter);
     void padRemoved(int id);
     int padNumber(int id);
+    int inputDevices() const;
+    void openJoystick(int index);
+    void buttonEvent(int dev, int sdlButton);
+    void stickEvent(int dev, bool horizontal, int value);
     std::string deviceName(int id);
     bool startGame();
     void toMenu();
@@ -326,6 +465,8 @@ private:
 App::~App() {
     session_.reset();
     gfx_.shutdown();
+    audio_.shutdown();
+    for (auto* j : joys_) SDL_JoystickClose(j);
     for (auto* p : pads_) SDL_GameControllerClose(p);
     if (gfx_.r) SDL_DestroyRenderer(gfx_.r);
     if (window_) SDL_DestroyWindow(window_);
@@ -335,7 +476,7 @@ App::~App() {
 }
 
 bool App::init() {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return false;
     }
@@ -375,12 +516,21 @@ bool App::init() {
         return false;
     }
 
-    for (int i = 0; i < SDL_NumJoysticks(); ++i)
-        if (SDL_IsGameController(i))
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (SDL_IsGameController(i)) {
             if (auto* p = SDL_GameControllerOpen(i)) {
                 pads_.push_back(p);
                 padNumber(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(p)));
             }
+        } else {
+            openJoystick(i);
+        }
+    }
+    audio_.init(assets_ + "/audio");
+#ifdef __SWITCH__
+    debugInput_ = true;  // o log aparece no terminal com `nxlink -s`
+#endif
+    if (std::getenv("MEMORIA_DEBUG")) debugInput_ = true;
 
     if (const char* s = std::getenv("MEMORIA_SCRIPT")) script_ = s;
     if (const char* d = std::getenv("MEMORIA_SHOT_DIR")) shotDir_ = d;
@@ -388,6 +538,53 @@ bool App::init() {
 }
 
 // ------------------------------------------------------------------ eventos
+
+// Um joystick que o SDL não conhece como "controle" ainda é usado, pelos números dos
+// botões do Switch (A=0 B=1 X=2 Y=3 +=10 -=11, direcional 12-15).
+void App::openJoystick(int index) {
+    if (SDL_Joystick* j = SDL_JoystickOpen(index)) {
+        joys_.push_back(j);
+        padNumber(SDL_JoystickInstanceID(j));
+    }
+}
+
+int App::inputDevices() const {
+    if (const char* d = std::getenv("MEMORIA_DEVICES")) return std::atoi(d);  // para testes
+    if (!script_.empty()) return 99;  // roteiro de teste: finge vários controles
+    int n = int(pads_.size() + joys_.size());
+#ifndef __SWITCH__
+    ++n;  // teclado
+#endif
+    return n;
+}
+
+void App::buttonEvent(int dev, int btn) {
+    if (debugInput_) std::fprintf(stderr, "[controle %d] botão %d\n", dev, btn);
+    auto push = [&](Action a) { queue_.push_back({a, dev, 0, 0}); };
+    switch (btn) {
+        case SDL_CONTROLLER_BUTTON_DPAD_UP: push(Action::Up); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN: push(Action::Down); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT: push(Action::Left); break;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: push(Action::Right); break;
+        case SDL_CONTROLLER_BUTTON_A: push(swapAB_ ? Action::Back : Action::Confirm); break;
+        case SDL_CONTROLLER_BUTTON_B: push(swapAB_ ? Action::Confirm : Action::Back); break;
+        case SDL_CONTROLLER_BUTTON_X: push(Action::ToggleMusic); break;
+        case SDL_CONTROLLER_BUTTON_Y: push(Action::Fill); break;
+        case SDL_CONTROLLER_BUTTON_BACK: push(Action::SwapButtons); break;
+        case SDL_CONTROLLER_BUTTON_START: push(Action::Quit); break;
+        default: break;
+    }
+}
+
+void App::stickEvent(int dev, bool horizontal, int v) {
+    int& st = stick_[dev][horizontal ? 0 : 1];
+    const int dir = v > 16000 ? 1 : v < -16000 ? -1 : (std::abs(v) < 8000 ? 0 : st);
+    if (dir != st && dir != 0) {
+        if (horizontal) queue_.push_back({dir > 0 ? Action::Right : Action::Left, dev, 0, 0});
+        else queue_.push_back({dir > 0 ? Action::Down : Action::Up, dev, 0, 0});
+    }
+    st = dir;
+}
 
 void App::pumpEvents() {
     auto pushFrom = [&](int dev, Action act, int x = 0, int y = 0) {
@@ -408,6 +605,7 @@ void App::pumpEvents() {
                         if (!e.key.repeat) key(Action::Confirm);
                         break;
                     case SDLK_TAB: key(Action::Fill); break;
+                    case SDLK_m: key(Action::ToggleMusic); break;
                     case SDLK_BACKSPACE: key(Action::Back); break;
                     case SDLK_ESCAPE: key(Action::Quit); break;
                     case SDLK_f: case SDLK_F11: {
@@ -418,11 +616,18 @@ void App::pumpEvents() {
                     default: break;
                 }
                 break;
-            case SDL_MOUSEBUTTONDOWN:  // o toque na tela do Switch também vira clique
-                if (e.button.button == SDL_BUTTON_LEFT) {
+            case SDL_MOUSEBUTTONDOWN:
+                // Cliques sintéticos do toque são ignorados: o toque é tratado abaixo.
+                if (e.button.button == SDL_BUTTON_LEFT && e.button.which != SDL_TOUCH_MOUSEID) {
                     float lx, ly;
                     SDL_RenderWindowToLogical(gfx_.r, e.button.x, e.button.y, &lx, &ly);
                     pushFrom(kDeviceMouse, Action::Click, int(lx), int(ly));
+                }
+                break;
+            case SDL_FINGERDOWN:  // tela de toque (não o trackpad do Mac)
+                if (SDL_GetTouchDeviceType(e.tfinger.touchId) == SDL_TOUCH_DEVICE_DIRECT) {
+                    if (debugInput_) std::fprintf(stderr, "[toque] %.2f %.2f\n", e.tfinger.x, e.tfinger.y);
+                    pushFrom(kDeviceMouse, Action::Click, int(e.tfinger.x * kW), int(e.tfinger.y * kH));
                 }
                 break;
             case SDL_CONTROLLERDEVICEADDED:
@@ -430,6 +635,9 @@ void App::pumpEvents() {
                     pads_.push_back(p);
                     padNumber(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(p)));
                 }
+                break;
+            case SDL_JOYDEVICEADDED:
+                if (!SDL_IsGameController(e.jdevice.which)) openJoystick(e.jdevice.which);
                 break;
             case SDL_CONTROLLERDEVICEREMOVED:
                 if (auto* p = SDL_GameControllerFromInstanceID(e.cdevice.which)) {
@@ -439,37 +647,50 @@ void App::pumpEvents() {
                 stick_.erase(e.cdevice.which);
                 padRemoved(e.cdevice.which);
                 break;
-            case SDL_CONTROLLERBUTTONDOWN: {
-                const int dev = e.cbutton.which;  // id de instância: identifica o controle
-                switch (e.cbutton.button) {
-                    case SDL_CONTROLLER_BUTTON_DPAD_UP: pushFrom(dev, Action::Up); break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: pushFrom(dev, Action::Down); break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: pushFrom(dev, Action::Left); break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: pushFrom(dev, Action::Right); break;
-                    case SDL_CONTROLLER_BUTTON_A: pushFrom(dev, Action::Confirm); break;
-                    case SDL_CONTROLLER_BUTTON_B: pushFrom(dev, Action::Back); break;
-                    case SDL_CONTROLLER_BUTTON_Y: pushFrom(dev, Action::Fill); break;
-                    case SDL_CONTROLLER_BUTTON_START: pushFrom(dev, Action::Quit); break;
-                    default: break;
+            case SDL_JOYDEVICEREMOVED:
+                if (auto* j = SDL_JoystickFromInstanceID(e.jdevice.which)) {
+                    const auto it = std::find(joys_.begin(), joys_.end(), j);
+                    if (it != joys_.end()) {
+                        joys_.erase(it);
+                        SDL_JoystickClose(j);
+                        stick_.erase(e.jdevice.which);
+                        padRemoved(e.jdevice.which);
+                    }
                 }
                 break;
-            }
-            case SDL_CONTROLLERAXISMOTION: {
-                const int axis = e.caxis.axis;
-                if (axis != SDL_CONTROLLER_AXIS_LEFTX && axis != SDL_CONTROLLER_AXIS_LEFTY) break;
-                const int dev = e.caxis.which;
-                int& st = stick_[dev][axis == SDL_CONTROLLER_AXIS_LEFTY];
-                const int v = e.caxis.value;
-                const int dir = v > 16000 ? 1 : v < -16000 ? -1 : (std::abs(v) < 8000 ? 0 : st);
-                if (dir != st && dir != 0) {
-                    if (axis == SDL_CONTROLLER_AXIS_LEFTX)
-                        pushFrom(dev, dir > 0 ? Action::Right : Action::Left);
-                    else
-                        pushFrom(dev, dir > 0 ? Action::Down : Action::Up);
-                }
-                st = dir;
+            case SDL_CONTROLLERBUTTONDOWN:
+                buttonEvent(e.cbutton.which, e.cbutton.button);
                 break;
-            }
+            case SDL_CONTROLLERAXISMOTION:
+                if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) stickEvent(e.caxis.which, true, e.caxis.value);
+                else if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) stickEvent(e.caxis.which, false, e.caxis.value);
+                break;
+            // Joysticks "crus": os eventos de quem já é controle são ignorados (já tratados acima).
+            case SDL_JOYBUTTONDOWN:
+                if (!SDL_GameControllerFromInstanceID(e.jbutton.which)) {
+                    static const int kNx[16] = {
+                        SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X,
+                        SDL_CONTROLLER_BUTTON_Y, -1, -1, -1, -1, -1, -1,
+                        SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_BACK,
+                        SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_UP,
+                        SDL_CONTROLLER_BUTTON_DPAD_RIGHT, SDL_CONTROLLER_BUTTON_DPAD_DOWN};
+                    if (debugInput_) std::fprintf(stderr, "[joystick %d] botão cru %d\n", int(e.jbutton.which), int(e.jbutton.button));
+                    if (e.jbutton.button < 16 && kNx[e.jbutton.button] >= 0)
+                        buttonEvent(e.jbutton.which, kNx[e.jbutton.button]);
+                }
+                break;
+            case SDL_JOYAXISMOTION:
+                if (!SDL_GameControllerFromInstanceID(e.jaxis.which) && e.jaxis.axis < 2)
+                    stickEvent(e.jaxis.which, e.jaxis.axis == 0, e.jaxis.value);
+                break;
+            case SDL_JOYHATMOTION:
+                if (!SDL_GameControllerFromInstanceID(e.jhat.which)) {
+                    if (e.jhat.value & SDL_HAT_UP) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_UP);
+                    if (e.jhat.value & SDL_HAT_DOWN) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+                    if (e.jhat.value & SDL_HAT_LEFT) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+                    if (e.jhat.value & SDL_HAT_RIGHT) buttonEvent(e.jhat.which, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+                }
+                break;
             default: break;
         }
     }
@@ -638,9 +859,12 @@ SDL_Rect App::cardRect(int i) const {
 void App::flipCard(int i) {
     Session& s = *session_;
     const int player = s.game->currentPlayer();
-    switch (s.game->flip(i)) {
+    const memory::FlipResult result = s.game->flip(i);
+    if (result != memory::FlipResult::Invalid) audio_.play(Sfx::Flip);
+    switch (result) {
         case memory::FlipResult::First: s.firstPick = i; break;
         case memory::FlipResult::Match:
+            audio_.play(Sfx::Match);
             s.owner[s.firstPick] = s.owner[i] = player;
             s.firstPick = -1;
             if (s.game->finished()) s.finishTimer = 1.4f;
@@ -648,6 +872,7 @@ void App::flipCard(int i) {
         case memory::FlipResult::Mismatch:
             s.firstPick = -1;
             s.mismatchTimer = 1.1f;
+            s.wrongTimer = 0.3f;
             break;
         case memory::FlipResult::Invalid: break;
     }
@@ -687,7 +912,7 @@ void App::gameInput(const Input& in) {
             }
             break;
         case Action::Back: case Action::Quit: toMenu(); break;
-        case Action::Fill: break;
+        case Action::Fill: case Action::ToggleMusic: case Action::SwapButtons: break;
         case Action::DebugMatch:
         case Action::DebugMismatch: {
             if (s.game->phase() != memory::Phase::PickFirst) break;
@@ -737,7 +962,8 @@ std::string App::deviceName(int id) {
 bool App::allowed(const Input& in) const {
     if (screen_ != Screen::Game || !session_) return true;
     switch (in.action) {
-        case Action::Quit: case Action::DebugMatch: case Action::DebugMismatch: return true;
+        case Action::Quit: case Action::ToggleMusic: case Action::SwapButtons:
+        case Action::DebugMatch: case Action::DebugMismatch: return true;
         default: break;
     }
     const int owner = slots_[session_->game->currentPlayer()];
@@ -751,6 +977,11 @@ void App::requestStart(bool reuseSlots, int starter) {
         if (!startGame()) toMenu();
         return;
     }
+    if (inputDevices() < 2) {  // um controle só (ex.: Switch portátil): todos dividem
+        slots_.assign(n, kDeviceAny);
+        if (!startGame()) toMenu();
+        return;
+    }
     bool ready = reuseSlots && int(slots_.size()) == n;
     if (ready)
         for (int d : slots_) ready = ready && d != kDeviceNone;
@@ -759,7 +990,7 @@ void App::requestStart(bool reuseSlots, int starter) {
         return;
     }
     slots_.assign(n, kDeviceNone);
-    slots_[0] = starter;  // quem apertou "Jogar" já entra como Jogador 1
+    if (starter != kDeviceMouse) slots_[0] = starter;  // quem apertou "Jogar" já é o Jogador 1
     session_.reset();
     screen_ = Screen::Assign;
 }
@@ -828,6 +1059,19 @@ void App::renderAssign() {
 
 void App::handle(const Input& in) {
     if (!allowed(in)) return;
+    if (in.action == Action::ToggleMusic) { audio_.toggleMusic(); return; }
+    if (in.action == Action::SwapButtons) {
+        swapAB_ = !swapAB_;
+        audio_.play(Sfx::Click);
+        return;
+    }
+    if (screen_ != Screen::Game) {
+        switch (in.action) {
+            case Action::Up: case Action::Down: case Action::Left: case Action::Right:
+            case Action::Confirm: case Action::Click: audio_.play(Sfx::Click); break;
+            default: break;
+        }
+    }
     switch (screen_) {
         case Screen::Menu: menuInput(in); break;
         case Screen::Assign: assignInput(in); break;
@@ -846,13 +1090,20 @@ void App::update(float dt) {
         float& f = s.flip[i];
         f = f < target ? std::min(target, f + step) : std::max(target, f - step);
     }
+    if (s.wrongTimer > 0) {
+        s.wrongTimer -= dt;
+        if (s.wrongTimer <= 0) audio_.play(Sfx::Wrong);
+    }
     if (s.game->phase() == memory::Phase::Mismatch) {
         s.mismatchTimer -= dt;
         if (s.mismatchTimer <= 0) s.game->resolveMismatch();
     }
     if (s.game->finished()) {
         s.finishTimer -= dt;
-        if (s.finishTimer <= 0) screen_ = Screen::Result;
+        if (s.finishTimer <= 0) {
+            screen_ = Screen::Result;
+            audio_.play(Sfx::Win);
+        }
     }
 }
 
@@ -908,8 +1159,13 @@ void App::renderMenu() {
     if (sel) gfx_.fillRound({pb.x - 6, pb.y - 6, pb.w + 12, pb.h + 12}, 40, kInk);
     gfx_.fillRound(pb, 36, kPlayerColor[2]);
     gfx_.text("Jogar!", kMedium, kWhite, pb.x + pb.w / 2, pb.y + pb.h / 2);
+    gfx_.text(!audio_.available() ? "Sem áudio" : audio_.musicOn() ? "Música: ligada (M ou X)"
+                                                                   : "Música: desligada (M ou X)",
+              kSmall, kMuted, kW - 30, 30, Align::Right);
+    gfx_.text(swapAB_ ? "A e B trocados" : "", kSmall, kMuted, 30, 30, Align::Left);
     gfx_.text("Setas: escolher e mudar     Enter ou A: confirmar     Esc ou +: sair", kSmall, kMuted,
-              kW / 2, kH - 28);
+              kW / 2, kH - 52);
+    gfx_.text("Botões invertidos? Aperte  -  para trocar A e B", kSmall, kMuted, kW / 2, kH - 22);
 }
 
 void App::renderGame() {
@@ -1005,6 +1261,8 @@ void App::run() {
 int main(int, char**) {
 #ifdef __SWITCH__
     romfsInit();  // monta romfs:/ (os assets embutidos no .nro)
+    socketInitializeDefault();
+    nxlinkStdio();  // com `nxlink -s`, os logs aparecem no terminal do computador
 #endif
     int rc = 0;
     {
@@ -1013,6 +1271,7 @@ int main(int, char**) {
         else app.run();
     }  // o App precisa ser destruído antes de desmontar o romfs
 #ifdef __SWITCH__
+    socketExit();
     romfsExit();
 #endif
     return rc;
