@@ -405,7 +405,6 @@ private:
     bool debugInput_ = false;
     std::unordered_map<int, std::array<int, 2>> stick_;  // por dispositivo
     std::unordered_map<int, int> padNumber_;             // id -> "Controle N"
-    int nextPadNumber_ = 1;
     std::vector<int> slots_;  // dispositivo de cada jogador (kDeviceNone = livre)
     std::vector<Input> queue_;
     float clock_ = 0;
@@ -436,6 +435,7 @@ private:
     void requestStart(bool reuseSlots, int starter);
     void padRemoved(int id);
     int padNumber(int id);
+    void rescanPads();
     int inputDevices() const;
     void openJoystick(int index);
     void addPad(SDL_GameController* p);
@@ -514,13 +514,22 @@ bool App::init() {
         return false;
     }
 
-    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
-        if (SDL_IsGameController(i)) {
-            addPad(SDL_GameControllerOpen(i));
-        } else {
-            openJoystick(i);
+    if (const char* v = std::getenv("MEMORIA_VIRTUAL_PADS")) {  // só para testes
+        for (int i = 0, n = std::atoi(v); i < n; ++i) {
+            SDL_VirtualJoystickDesc d;
+            SDL_zero(d);
+            d.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+            d.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+            d.naxes = SDL_CONTROLLER_AXIS_MAX;
+            d.nbuttons = SDL_CONTROLLER_BUTTON_MAX;
+            d.name = "Controle virtual";
+            SDL_JoystickAttachVirtualEx(&d);
         }
     }
+    rescanPads();
+    if (std::getenv("MEMORIA_DEBUG"))
+        std::fprintf(stderr, "controles abertos: %d (de %d conectados)\n",
+                     int(pads_.size() + joys_.size()), SDL_NumJoysticks());
     audio_.init(assets_ + "/audio");
 #ifdef __SWITCH__
     debugInput_ = true;  // o log aparece no terminal com `nxlink -s`
@@ -538,14 +547,30 @@ bool App::init() {
 // botões do Switch (A=0 B=1 X=2 Y=3 +=10 -=11, direcional 12-15).
 void App::addPad(SDL_GameController* p) {
     if (!p || std::find(pads_.begin(), pads_.end(), p) != pads_.end()) return;
+    if (int(pads_.size() + joys_.size()) >= memory::kMaxPlayers) {  // o jogo é de até 4
+        SDL_GameControllerClose(p);
+        return;
+    }
     pads_.push_back(p);
     padNumber(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(p)));
 }
 
 void App::openJoystick(int index) {
+    if (int(pads_.size() + joys_.size()) >= memory::kMaxPlayers) return;
     if (SDL_Joystick* j = SDL_JoystickOpen(index)) {
         joys_.push_back(j);
         padNumber(SDL_JoystickInstanceID(j));
+    }
+}
+
+// Abre os controles conectados que ainda não estão em uso, até o limite de 4.
+void App::rescanPads() {
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (int(pads_.size() + joys_.size()) >= memory::kMaxPlayers) return;
+        const SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(i);
+        if (SDL_JoystickFromInstanceID(id)) continue;  // já aberto
+        if (SDL_IsGameController(i)) addPad(SDL_GameControllerOpen(i));
+        else openJoystick(i);
     }
 }
 
@@ -645,6 +670,7 @@ void App::pumpEvents() {
                 }
                 stick_.erase(e.cdevice.which);
                 padRemoved(e.cdevice.which);
+                rescanPads();
                 break;
             case SDL_JOYDEVICEREMOVED:
                 if (auto* j = SDL_JoystickFromInstanceID(e.jdevice.which)) {
@@ -654,6 +680,7 @@ void App::pumpEvents() {
                         SDL_JoystickClose(j);
                         stick_.erase(e.jdevice.which);
                         padRemoved(e.jdevice.which);
+                        rescanPads();
                     }
                 }
                 break;
@@ -940,10 +967,18 @@ void App::resultInput(const Input& in) {
 
 // ---------------------------------------------------------- controles (1 por jogador)
 
+// "Controle N" usa o menor número livre entre os controles conectados (1 a 4), em vez de
+// crescer a cada reconexão. Assim a tela nunca sugere mais de 4 controles.
 int App::padNumber(int id) {
     auto it = padNumber_.find(id);
     if (it != padNumber_.end()) return it->second;
-    return padNumber_[id] = nextPadNumber_++;
+    int n = 1;
+    for (;; ++n) {
+        bool used = false;
+        for (const auto& kv : padNumber_) used = used || kv.second == n;
+        if (!used) break;
+    }
+    return padNumber_[id] = n;
 }
 
 std::string App::deviceName(int id) {
@@ -1001,6 +1036,7 @@ void App::requestStart(bool reuseSlots, int starter) {
 // Um controle sumiu: libera as vagas dele. No meio da partida, pausa e pede para
 // atribuir de novo, sem perder o jogo.
 void App::padRemoved(int id) {
+    padNumber_.erase(id);  // libera o número para o próximo controle
     bool used = false;
     for (int& d : slots_)
         if (d == id) { d = kDeviceNone; used = true; }
@@ -1072,7 +1108,7 @@ void App::renderAssign() {
     const int n = settings_.players;
     gfx_.text("Controles", kBig, kInk, kW / 2, 90);
     gfx_.text(session_ ? "Um controle desconectou: quem ficou sem controle entra de novo"
-                       : "Cada jogador usa o seu: A no controle, Enter no teclado ou clique no mouse",
+                       : "Até 4 jogadores. Cada um usa o seu: A no controle, Enter no teclado ou clique no mouse",
               kSmall, kMuted, kW / 2, 164);
     const auto firstFree = std::find(slots_.begin(), slots_.end(), kDeviceNone);
     int freeSlots = 0;
