@@ -39,7 +39,7 @@ com a vaga do Jogador 1.
   na parte de baixo da tela (pode ser antes de todos entrarem): clique ou toque nele, aperte **+** no controle, ou aperte **Baixo** e depois **A**/Enter.
   As vagas que ninguém assumiu jogam com qualquer dispositivo.
 - Faltou controle? Aperte **Y** (ou **Tab**) e o resto dos jogadores divide aquele controle.
-- **B** (ou Backspace) libera a vaga. **Esc** ou **+** volta ao menu.
+- **B** (ou Backspace) libera a vaga. **Esc** volta ao menu (no controle, **+** aqui é "começar agora").
 - Se um controle desconectar no meio da partida, o jogo pausa e pede para atribuir de novo,
   sem perder a partida.
 - Sozinho (1 jogador), qualquer controle serve.
