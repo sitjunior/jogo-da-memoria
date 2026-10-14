@@ -42,6 +42,8 @@ com a vaga do Jogador 1.
 - Se um controle desconectar no meio da partida, o jogo pausa e pede para atribuir de novo,
   sem perder a partida.
 - Sozinho (1 jogador), qualquer controle serve.
+- No computador, **teclado e mouse contam como dois dispositivos**: com 2 jogadores dá para um usar o
+  teclado e o outro o mouse. No Switch só contam os controles; o toque na tela não é um jogador.
 
 ## Testes
 

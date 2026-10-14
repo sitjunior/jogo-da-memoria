@@ -441,6 +441,7 @@ private:
     int padNumber(int id);
     int inputDevices() const;
     void openJoystick(int index);
+    void addPad(SDL_GameController* p);
     void buttonEvent(int dev, int sdlButton);
     void stickEvent(int dev, bool horizontal, int value);
     std::string deviceName(int id);
@@ -518,10 +519,7 @@ bool App::init() {
 
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
         if (SDL_IsGameController(i)) {
-            if (auto* p = SDL_GameControllerOpen(i)) {
-                pads_.push_back(p);
-                padNumber(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(p)));
-            }
+            addPad(SDL_GameControllerOpen(i));
         } else {
             openJoystick(i);
         }
@@ -541,6 +539,12 @@ bool App::init() {
 
 // Um joystick que o SDL não conhece como "controle" ainda é usado, pelos números dos
 // botões do Switch (A=0 B=1 X=2 Y=3 +=10 -=11, direcional 12-15).
+void App::addPad(SDL_GameController* p) {
+    if (!p || std::find(pads_.begin(), pads_.end(), p) != pads_.end()) return;
+    pads_.push_back(p);
+    padNumber(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(p)));
+}
+
 void App::openJoystick(int index) {
     if (SDL_Joystick* j = SDL_JoystickOpen(index)) {
         joys_.push_back(j);
@@ -553,7 +557,7 @@ int App::inputDevices() const {
     if (!script_.empty()) return 99;  // roteiro de teste: finge vários controles
     int n = int(pads_.size() + joys_.size());
 #ifndef __SWITCH__
-    ++n;  // teclado
+    n += 2;  // no computador, teclado e mouse são dois dispositivos (cada um pode ser um jogador)
 #endif
     return n;
 }
@@ -631,10 +635,7 @@ void App::pumpEvents() {
                 }
                 break;
             case SDL_CONTROLLERDEVICEADDED:
-                if (auto* p = SDL_GameControllerOpen(e.cdevice.which)) {
-                    pads_.push_back(p);
-                    padNumber(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(p)));
-                }
+                addPad(SDL_GameControllerOpen(e.cdevice.which));
                 break;
             case SDL_JOYDEVICEADDED:
                 if (!SDL_IsGameController(e.jdevice.which)) openJoystick(e.jdevice.which);
@@ -990,7 +991,11 @@ void App::requestStart(bool reuseSlots, int starter) {
         return;
     }
     slots_.assign(n, kDeviceNone);
-    if (starter != kDeviceMouse) slots_[0] = starter;  // quem apertou "Jogar" já é o Jogador 1
+#ifdef __SWITCH__
+    if (starter != kDeviceMouse) slots_[0] = starter;  // o toque na tela não conta como jogador
+#else
+    slots_[0] = starter;  // quem apertou "Jogar" já é o Jogador 1
+#endif
     session_.reset();
     screen_ = Screen::Assign;
 }
@@ -1038,7 +1043,7 @@ void App::renderAssign() {
     const int n = settings_.players;
     gfx_.text("Controles", kBig, kInk, kW / 2, 100);
     gfx_.text(session_ ? "Um controle desconectou: quem ficou sem controle aperta A de novo"
-                       : "Cada jogador aperta A (ou Enter) no seu controle",
+                       : "Cada jogador usa o seu: A no controle, Enter no teclado ou clique no mouse",
               kSmall, kMuted, kW / 2, 188);
     const auto firstFree = std::find(slots_.begin(), slots_.end(), kDeviceNone);
     for (int i = 0; i < n; ++i) {
@@ -1049,11 +1054,11 @@ void App::renderAssign() {
         gfx_.fillRound({rc.x + 14, rc.y + 14, 48, 48}, 24, kPlayerColor[i]);
         gfx_.text("Jogador " + std::to_string(i + 1), kMedium, kInk, rc.x + 82, rc.y + rc.h / 2, Align::Left);
         if (slots_[i] == kDeviceNone)
-            gfx_.text("aperte A", kSmall, kMuted, rc.x + rc.w - 28, rc.y + rc.h / 2, Align::Right);
+            gfx_.text("A / Enter / clique", kSmall, kMuted, rc.x + rc.w - 28, rc.y + rc.h / 2, Align::Right);
         else
             gfx_.text(deviceName(slots_[i]), kMedium, kPlayerColor[i], rc.x + rc.w - 28, rc.y + rc.h / 2, Align::Right);
     }
-    gfx_.text("A ou Enter: entrar     Y ou Tab: o resto joga neste controle", kSmall, kMuted, kW / 2, kH - 62);
+    gfx_.text("A, Enter ou clique: entrar     Y ou Tab: o resto joga neste dispositivo", kSmall, kMuted, kW / 2, kH - 62);
     gfx_.text("B ou Backspace: sair da vaga     Esc ou +: menu", kSmall, kMuted, kW / 2, kH - 28);
 }
 
