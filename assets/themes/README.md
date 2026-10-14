@@ -8,3 +8,5 @@ Cada tema é uma pasta com PNGs:
 Sugestão de origem: pacotes CC0 do https://kenney.nl/assets (ex.: "Animal Pack").
 Copie os PNGs, renomeie para 01.png, 02.png, ... e escolha uma imagem de verso.
 Recomendado: 256x256, fundo transparente.
+
+Temas incluídos: `animais` e `objetos` (OpenMoji, ver ../CREDITS.md).
