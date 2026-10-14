@@ -25,8 +25,6 @@ Linux (Debian/Ubuntu): `sudo apt install cmake libsdl2-dev libsdl2-image-dev lib
 | Voltar ao menu | Backspace | B |
 | Sair (no menu) | Esc | + |
 | Tela cheia | F ou F11 | – |
-| Música ligada/desligada | M | X |
-| Trocar A e B (se vierem invertidos) | – | - |
 
 O mouse (ou o toque na tela do Switch) também funciona: clique na carta ou nas opções do menu.
 
@@ -90,14 +88,13 @@ Os assets ficam dentro do `.nro`. Se preferir, também são procurados em
 
 A música e os efeitos (virar carta, acerto, erro, vitória) são sintetizados por
 `tools/make_audio.py` e ficam em `assets/audio/*.wav`. Para regerar: `python3 tools/make_audio.py`.
-Sem dispositivo de áudio, o jogo segue mudo.
+A música fica sempre ligada. Sem dispositivo de áudio, o jogo segue mudo.
 
 ## Se algo não responder no Switch
 
 - Com um só controle (ex.: portátil), o jogo vai direto para a partida e todos dividem o controle,
   mesmo com 2 a 4 jogadores. A tela "Controles" só aparece quando há 2 ou mais controles.
-- Botões A e B: no Switch o SDL os entrega trocados, então o jogo já os inverte por padrão. Se ainda
-  vierem ao contrário, aperte **-** no menu para inverter de novo.
+- Botões A e B: no Switch o SDL os entrega trocados, então o jogo já os inverte sozinho.
 - Para ver o que o jogo recebe, abra o hbmenu, aperte **Y** (netloader) e rode no Mac:
 
       $DEVKITPRO/tools/bin/nxlink -s -a <IP do Switch> jogo-da-memoria.nro

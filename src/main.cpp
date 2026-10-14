@@ -27,11 +27,11 @@
 namespace {
 
 // No Switch o SDL entrega A e B trocados em relação aos rótulos do controle Nintendo
-// (confirmado no aparelho), então a troca já vem ligada por padrão. No Mac não.
+// (confirmado no aparelho), então a troca é fixa nele. No Mac não troca.
 #ifdef __SWITCH__
-constexpr bool kSwapABDefault = true;
+constexpr bool kSwapAB = true;
 #else
-constexpr bool kSwapABDefault = false;
+constexpr bool kSwapAB = false;
 #endif
 
 constexpr float kPi = 3.14159265358979f;  // M_PI não existe em todo toolchain (ex.: newlib estrito)
@@ -258,16 +258,6 @@ public:
         SDL_UnlockAudioDevice(dev_);
     }
 
-    bool toggleMusic() {
-        if (!dev_) return false;
-        SDL_LockAudioDevice(dev_);
-        musicOn_ = !musicOn_;
-        SDL_UnlockAudioDevice(dev_);
-        return musicOn_;
-    }
-    bool available() const { return dev_ != 0; }
-    bool musicOn() const { return musicOn_; }
-
 private:
     struct Clip {
         std::vector<Uint8> pcm;
@@ -285,7 +275,6 @@ private:
     Clip sfx_[int(Sfx::Count)];
     Voice voices_[8];
     size_t musicPos_ = 0;
-    bool musicOn_ = true;
 
     bool load(const std::string& file, Clip& out) {
         SDL_AudioSpec ws;
@@ -314,7 +303,7 @@ private:
 
     void mix(Uint8* stream, int len) {
         SDL_memset(stream, 0, size_t(len));
-        if (musicOn_ && !music_.pcm.empty()) {
+        if (!music_.pcm.empty()) {
             int off = 0;
             while (off < len) {
                 const size_t left = music_.pcm.size() - musicPos_;
@@ -342,8 +331,6 @@ private:
 
 enum class Action {
     Up, Down, Left, Right, Confirm, Back, Quit, Click,
-    ToggleMusic,    // M no teclado, X no controle
-    SwapButtons,    // - no controle: troca A e B (caso o SDL entregue invertidos)
     Fill,           // na tela de controles: este controle fica com todas as vagas livres
     DebugMatch,     // só pelo roteiro de teste (MEMORIA_SCRIPT)
     DebugMismatch,  // idem
@@ -414,7 +401,6 @@ private:
     std::vector<SDL_GameController*> pads_;
     std::vector<SDL_Joystick*> joys_;  // joysticks que o SDL não reconhece como controle
     Audio audio_;
-    bool swapAB_ = kSwapABDefault;
     bool assignOnButton_ = false;  // foco no botão "Começar agora" da tela de controles
     bool debugInput_ = false;
     std::unordered_map<int, std::array<int, 2>> stick_;  // por dispositivo
@@ -581,11 +567,9 @@ void App::buttonEvent(int dev, int btn) {
         case SDL_CONTROLLER_BUTTON_DPAD_DOWN: push(Action::Down); break;
         case SDL_CONTROLLER_BUTTON_DPAD_LEFT: push(Action::Left); break;
         case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: push(Action::Right); break;
-        case SDL_CONTROLLER_BUTTON_A: push(swapAB_ ? Action::Back : Action::Confirm); break;
-        case SDL_CONTROLLER_BUTTON_B: push(swapAB_ ? Action::Confirm : Action::Back); break;
-        case SDL_CONTROLLER_BUTTON_X: push(Action::ToggleMusic); break;
+        case SDL_CONTROLLER_BUTTON_A: push(kSwapAB ? Action::Back : Action::Confirm); break;
+        case SDL_CONTROLLER_BUTTON_B: push(kSwapAB ? Action::Confirm : Action::Back); break;
         case SDL_CONTROLLER_BUTTON_Y: push(Action::Fill); break;
-        case SDL_CONTROLLER_BUTTON_BACK: push(Action::SwapButtons); break;
         case SDL_CONTROLLER_BUTTON_START: push(Action::Quit); break;
         default: break;
     }
@@ -620,7 +604,6 @@ void App::pumpEvents() {
                         if (!e.key.repeat) key(Action::Confirm);
                         break;
                     case SDLK_TAB: key(Action::Fill); break;
-                    case SDLK_m: key(Action::ToggleMusic); break;
                     case SDLK_BACKSPACE: key(Action::Back); break;
                     case SDLK_ESCAPE: key(Action::Quit); break;
                     case SDLK_f: case SDLK_F11: {
@@ -924,7 +907,7 @@ void App::gameInput(const Input& in) {
             }
             break;
         case Action::Back: case Action::Quit: toMenu(); break;
-        case Action::Fill: case Action::ToggleMusic: case Action::SwapButtons: break;
+        case Action::Fill: break;
         case Action::DebugMatch:
         case Action::DebugMismatch: {
             if (s.game->phase() != memory::Phase::PickFirst) break;
@@ -974,8 +957,7 @@ std::string App::deviceName(int id) {
 bool App::allowed(const Input& in) const {
     if (screen_ != Screen::Game || !session_) return true;
     switch (in.action) {
-        case Action::Quit: case Action::ToggleMusic: case Action::SwapButtons:
-        case Action::DebugMatch: case Action::DebugMismatch: return true;
+        case Action::Quit: case Action::DebugMatch: case Action::DebugMismatch: return true;
         default: break;
     }
     const int owner = slots_[session_->game->currentPlayer()];
@@ -1119,12 +1101,6 @@ void App::renderAssign() {
 
 void App::handle(const Input& in) {
     if (!allowed(in)) return;
-    if (in.action == Action::ToggleMusic) { audio_.toggleMusic(); return; }
-    if (in.action == Action::SwapButtons) {
-        swapAB_ = !swapAB_;
-        audio_.play(Sfx::Click);
-        return;
-    }
     if (screen_ != Screen::Game) {
         switch (in.action) {
             case Action::Up: case Action::Down: case Action::Left: case Action::Right:
@@ -1219,14 +1195,8 @@ void App::renderMenu() {
     if (sel) gfx_.fillRound({pb.x - 6, pb.y - 6, pb.w + 12, pb.h + 12}, 40, kInk);
     gfx_.fillRound(pb, 36, kPlayerColor[2]);
     gfx_.text("Jogar!", kMedium, kWhite, pb.x + pb.w / 2, pb.y + pb.h / 2);
-    gfx_.text(!audio_.available() ? "Sem áudio" : audio_.musicOn() ? "Música: ligada (M ou X)"
-                                                                   : "Música: desligada (M ou X)",
-              kSmall, kMuted, kW - 30, 30, Align::Right);
-    gfx_.text(swapAB_ != kSwapABDefault ? "A e B invertidos (tecla -)" : "", kSmall, kMuted, 30, 30,
-              Align::Left);
     gfx_.text("Setas: escolher e mudar     Enter ou A: confirmar     Esc ou +: sair", kSmall, kMuted,
-              kW / 2, kH - 52);
-    gfx_.text("A e B ao contrário? Aperte  -  para inverter", kSmall, kMuted, kW / 2, kH - 22);
+              kW / 2, kH - 28);
 }
 
 void App::renderGame() {
