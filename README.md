@@ -28,6 +28,19 @@ Linux (Debian/Ubuntu): `sudo apt install cmake libsdl2-dev libsdl2-image-dev lib
 
 O mouse (ou o toque na tela do Switch) também funciona: clique na carta ou nas opções do menu.
 
+## Um controle por jogador
+
+Com 2 a 4 jogadores, depois de "Jogar!" aparece a tela **Controles**: cada jogador aperta
+A (ou Enter, no teclado) no seu controle para ocupar uma vaga. Quem apertou "Jogar!" já fica
+com a vaga do Jogador 1.
+
+- Na partida, só o controle do jogador da vez mexe no cursor; os outros são ignorados.
+- Faltou controle? Aperte **Y** (ou **Tab**) e o resto dos jogadores divide aquele controle.
+- **B** (ou Backspace) libera a vaga. **Esc** ou **+** volta ao menu.
+- Se um controle desconectar no meio da partida, o jogo pausa e pede para atribuir de novo,
+  sem perder a partida.
+- Sozinho (1 jogador), qualquer controle serve.
+
 ## Testes
 
     ctest --test-dir build

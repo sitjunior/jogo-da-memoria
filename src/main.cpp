@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -199,11 +200,20 @@ private:
 
 enum class Action {
     Up, Down, Left, Right, Confirm, Back, Quit, Click,
+    Fill,           // na tela de controles: este controle fica com todas as vagas livres
     DebugMatch,     // só pelo roteiro de teste (MEMORIA_SCRIPT)
     DebugMismatch,  // idem
 };
+// Dispositivos de entrada. Controles usam o id de instância do SDL (>= 0).
+constexpr int kDeviceKeyboard = -1;
+constexpr int kDeviceMouse = -2;   // mouse ou toque na tela
+constexpr int kDeviceAny = -3;     // vaga sem dono fixo (modo solo)
+constexpr int kDeviceNone = -4;    // vaga ainda não atribuída
+constexpr int kScriptPadBase = 1000000;  // controles falsos do roteiro de teste
+
 struct Input {
     Action action;
+    int device = kDeviceKeyboard;
     int x = 0, y = 0;  // coordenadas lógicas, para Click
 };
 
@@ -232,7 +242,7 @@ struct Session {
     }
 };
 
-enum class Screen { Menu, Game, Result };
+enum class Screen { Menu, Assign, Game, Result };
 
 struct Settings {
     int players = 2;
@@ -257,7 +267,10 @@ private:
     std::unique_ptr<Session> session_;
     bool running_ = true;
     std::vector<SDL_GameController*> pads_;
-    int stick_[2] = {0, 0};
+    std::unordered_map<int, std::array<int, 2>> stick_;  // por dispositivo
+    std::unordered_map<int, int> padNumber_;             // id -> "Controle N"
+    int nextPadNumber_ = 1;
+    std::vector<int> slots_;  // dispositivo de cada jogador (kDeviceNone = livre)
     std::vector<Input> queue_;
     float clock_ = 0;
 
@@ -265,6 +278,7 @@ private:
     std::string script_;
     size_t scriptPos_ = 0;
     float scriptWait_ = 0;
+    int scriptDevice_ = kDeviceKeyboard;
     std::string shotDir_;
     int shotCount_ = 0;
     bool shotPending_ = false;
@@ -279,6 +293,12 @@ private:
     void menuInput(const Input& in);
     void gameInput(const Input& in);
     void resultInput(const Input& in);
+    void assignInput(const Input& in);
+    bool allowed(const Input& in) const;
+    void requestStart(bool reuseSlots, int starter);
+    void padRemoved(int id);
+    int padNumber(int id);
+    std::string deviceName(int id);
     bool startGame();
     void toMenu();
     void flipCard(int i);
@@ -288,6 +308,7 @@ private:
 
     void renderMenu();
     void renderGame();
+    void renderAssign();
     void renderResult();
     void renderScoreboard(int y);
     int  validSize(int size, int dir) const;
@@ -350,7 +371,10 @@ bool App::init() {
 
     for (int i = 0; i < SDL_NumJoysticks(); ++i)
         if (SDL_IsGameController(i))
-            if (auto* p = SDL_GameControllerOpen(i)) pads_.push_back(p);
+            if (auto* p = SDL_GameControllerOpen(i)) {
+                pads_.push_back(p);
+                padNumber(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(p)));
+            }
 
     if (const char* s = std::getenv("MEMORIA_SCRIPT")) script_ = s;
     if (const char* d = std::getenv("MEMORIA_SHOT_DIR")) shotDir_ = d;
@@ -360,22 +384,26 @@ bool App::init() {
 // ------------------------------------------------------------------ eventos
 
 void App::pumpEvents() {
-    auto push = [&](Action a, int x = 0, int y = 0) { queue_.push_back({a, x, y}); };
+    auto pushFrom = [&](int dev, Action act, int x = 0, int y = 0) {
+        queue_.push_back({act, dev, x, y});
+    };
+    auto key = [&](Action act) { pushFrom(kDeviceKeyboard, act); };
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         switch (e.type) {
             case SDL_QUIT: running_ = false; break;
             case SDL_KEYDOWN:
                 switch (e.key.keysym.sym) {
-                    case SDLK_UP: case SDLK_w: push(Action::Up); break;
-                    case SDLK_DOWN: case SDLK_s: push(Action::Down); break;
-                    case SDLK_LEFT: case SDLK_a: push(Action::Left); break;
-                    case SDLK_RIGHT: case SDLK_d: push(Action::Right); break;
+                    case SDLK_UP: case SDLK_w: key(Action::Up); break;
+                    case SDLK_DOWN: case SDLK_s: key(Action::Down); break;
+                    case SDLK_LEFT: case SDLK_a: key(Action::Left); break;
+                    case SDLK_RIGHT: case SDLK_d: key(Action::Right); break;
                     case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE:
-                        if (!e.key.repeat) push(Action::Confirm);
+                        if (!e.key.repeat) key(Action::Confirm);
                         break;
-                    case SDLK_BACKSPACE: push(Action::Back); break;
-                    case SDLK_ESCAPE: push(Action::Quit); break;
+                    case SDLK_TAB: key(Action::Fill); break;
+                    case SDLK_BACKSPACE: key(Action::Back); break;
+                    case SDLK_ESCAPE: key(Action::Quit); break;
                     case SDLK_f: case SDLK_F11: {
                         const bool fs = SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN_DESKTOP;
                         SDL_SetWindowFullscreen(window_, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -388,39 +416,50 @@ void App::pumpEvents() {
                 if (e.button.button == SDL_BUTTON_LEFT) {
                     float lx, ly;
                     SDL_RenderWindowToLogical(gfx_.r, e.button.x, e.button.y, &lx, &ly);
-                    push(Action::Click, int(lx), int(ly));
+                    pushFrom(kDeviceMouse, Action::Click, int(lx), int(ly));
                 }
                 break;
             case SDL_CONTROLLERDEVICEADDED:
-                if (auto* p = SDL_GameControllerOpen(e.cdevice.which)) pads_.push_back(p);
+                if (auto* p = SDL_GameControllerOpen(e.cdevice.which)) {
+                    pads_.push_back(p);
+                    padNumber(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(p)));
+                }
                 break;
             case SDL_CONTROLLERDEVICEREMOVED:
                 if (auto* p = SDL_GameControllerFromInstanceID(e.cdevice.which)) {
                     pads_.erase(std::remove(pads_.begin(), pads_.end(), p), pads_.end());
                     SDL_GameControllerClose(p);
                 }
+                stick_.erase(e.cdevice.which);
+                padRemoved(e.cdevice.which);
                 break;
-            case SDL_CONTROLLERBUTTONDOWN:
+            case SDL_CONTROLLERBUTTONDOWN: {
+                const int dev = e.cbutton.which;  // id de instância: identifica o controle
                 switch (e.cbutton.button) {
-                    case SDL_CONTROLLER_BUTTON_DPAD_UP: push(Action::Up); break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: push(Action::Down); break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: push(Action::Left); break;
-                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: push(Action::Right); break;
-                    case SDL_CONTROLLER_BUTTON_A: push(Action::Confirm); break;
-                    case SDL_CONTROLLER_BUTTON_B: push(Action::Back); break;
-                    case SDL_CONTROLLER_BUTTON_START: push(Action::Quit); break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_UP: pushFrom(dev, Action::Up); break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: pushFrom(dev, Action::Down); break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: pushFrom(dev, Action::Left); break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: pushFrom(dev, Action::Right); break;
+                    case SDL_CONTROLLER_BUTTON_A: pushFrom(dev, Action::Confirm); break;
+                    case SDL_CONTROLLER_BUTTON_B: pushFrom(dev, Action::Back); break;
+                    case SDL_CONTROLLER_BUTTON_Y: pushFrom(dev, Action::Fill); break;
+                    case SDL_CONTROLLER_BUTTON_START: pushFrom(dev, Action::Quit); break;
                     default: break;
                 }
                 break;
+            }
             case SDL_CONTROLLERAXISMOTION: {
                 const int axis = e.caxis.axis;
                 if (axis != SDL_CONTROLLER_AXIS_LEFTX && axis != SDL_CONTROLLER_AXIS_LEFTY) break;
-                int& st = stick_[axis == SDL_CONTROLLER_AXIS_LEFTY];
+                const int dev = e.caxis.which;
+                int& st = stick_[dev][axis == SDL_CONTROLLER_AXIS_LEFTY];
                 const int v = e.caxis.value;
                 const int dir = v > 16000 ? 1 : v < -16000 ? -1 : (std::abs(v) < 8000 ? 0 : st);
                 if (dir != st && dir != 0) {
-                    if (axis == SDL_CONTROLLER_AXIS_LEFTX) push(dir > 0 ? Action::Right : Action::Left);
-                    else push(dir > 0 ? Action::Down : Action::Up);
+                    if (axis == SDL_CONTROLLER_AXIS_LEFTX)
+                        pushFrom(dev, dir > 0 ? Action::Right : Action::Left);
+                    else
+                        pushFrom(dev, dir > 0 ? Action::Down : Action::Up);
                 }
                 st = dir;
                 break;
@@ -430,22 +469,30 @@ void App::pumpEvents() {
     }
 }
 
-// Roteiro de teste: cada letra vira uma ação (u d l r c b), w espera, s tira foto,
-// m/e jogam um acerto/erro, q sai. Só ativo com MEMORIA_SCRIPT definido.
+// Roteiro de teste (só ativo com MEMORIA_SCRIPT): u d l r c b y = ações do dispositivo
+// atual; 1-4 escolhem um "controle falso" e k/o o teclado/mouse; z desconecta o controle
+// atual; w espera; s tira foto; m/e jogam um acerto/erro; q sai.
 void App::pumpScript(float dt) {
     if (scriptPos_ >= script_.size()) return;
     scriptWait_ -= dt;
     if (scriptWait_ > 0) return;
     scriptWait_ = 0.35f;
-    switch (script_[scriptPos_++]) {
-        case 'u': queue_.push_back({Action::Up}); break;
-        case 'd': queue_.push_back({Action::Down}); break;
-        case 'l': queue_.push_back({Action::Left}); break;
-        case 'r': queue_.push_back({Action::Right}); break;
-        case 'c': queue_.push_back({Action::Confirm}); break;
-        case 'b': queue_.push_back({Action::Back}); break;
-        case 'm': queue_.push_back({Action::DebugMatch}); break;
-        case 'e': queue_.push_back({Action::DebugMismatch}); break;
+    auto act = [&](Action a) { queue_.push_back({a, scriptDevice_, 0, 0}); };
+    const char ch = script_[scriptPos_++];
+    switch (ch) {
+        case 'u': act(Action::Up); break;
+        case 'd': act(Action::Down); break;
+        case 'l': act(Action::Left); break;
+        case 'r': act(Action::Right); break;
+        case 'c': act(Action::Confirm); break;
+        case 'b': act(Action::Back); break;
+        case 'y': act(Action::Fill); break;
+        case 'm': act(Action::DebugMatch); break;
+        case 'e': act(Action::DebugMismatch); break;
+        case '1': case '2': case '3': case '4': scriptDevice_ = kScriptPadBase + (ch - '0'); break;
+        case 'k': scriptDevice_ = kDeviceKeyboard; break;
+        case 'o': scriptDevice_ = kDeviceMouse; break;
+        case 'z': padRemoved(scriptDevice_); break;
         case 'w': scriptWait_ = 1.6f; break;
         case 's': shotPending_ = true; break;
         case 'q': running_ = false; break;
@@ -502,7 +549,7 @@ void App::menuInput(const Input& in) {
         case Action::Left: changeValue(menuRow_, -1); break;
         case Action::Right: changeValue(menuRow_, +1); break;
         case Action::Confirm:
-            if (menuRow_ == 3) startGame();
+            if (menuRow_ == 3) requestStart(false, in.device);
             else changeValue(menuRow_, +1);
             break;
         case Action::Quit: running_ = false; break;
@@ -512,7 +559,7 @@ void App::menuInput(const Input& in) {
                 const SDL_Point p{in.x, in.y};
                 if (!SDL_PointInRect(&p, &rc)) continue;
                 menuRow_ = row;
-                if (row == 3) startGame();
+                if (row == 3) requestStart(false, in.device);
                 else changeValue(row, in.x < rc.x + rc.w - 170 ? -1 : +1);
             }
             break;
@@ -630,6 +677,7 @@ void App::gameInput(const Input& in) {
             }
             break;
         case Action::Back: case Action::Quit: toMenu(); break;
+        case Action::Fill: break;
         case Action::DebugMatch:
         case Action::DebugMismatch: {
             if (s.game->phase() != memory::Phase::PickFirst) break;
@@ -649,16 +697,130 @@ void App::gameInput(const Input& in) {
 void App::resultInput(const Input& in) {
     switch (in.action) {
         case Action::Confirm: case Action::Click:
-            if (!startGame()) toMenu();
+            requestStart(true, in.device);
             break;
         case Action::Back: case Action::Quit: toMenu(); break;
         default: break;
     }
 }
 
+// ---------------------------------------------------------- controles (1 por jogador)
+
+int App::padNumber(int id) {
+    auto it = padNumber_.find(id);
+    if (it != padNumber_.end()) return it->second;
+    return padNumber_[id] = nextPadNumber_++;
+}
+
+std::string App::deviceName(int id) {
+    switch (id) {
+        case kDeviceKeyboard: return "Teclado";
+        case kDeviceMouse: return "Mouse / toque";
+        case kDeviceAny: return "qualquer controle";
+        case kDeviceNone: return "";
+        default: return "Controle " + std::to_string(padNumber(id));
+    }
+}
+
+// Durante a partida, só o dispositivo do jogador da vez manda. Sair (Esc ou +) vale
+// para todos; no menu, na atribuição e no resultado qualquer dispositivo vale.
+bool App::allowed(const Input& in) const {
+    if (screen_ != Screen::Game || !session_) return true;
+    switch (in.action) {
+        case Action::Quit: case Action::DebugMatch: case Action::DebugMismatch: return true;
+        default: break;
+    }
+    const int owner = slots_[session_->game->currentPlayer()];
+    return owner == kDeviceAny || owner == in.device;
+}
+
+void App::requestStart(bool reuseSlots, int starter) {
+    const int n = settings_.players;
+    if (n == 1) {  // sozinho: qualquer controle serve
+        slots_.assign(1, kDeviceAny);
+        if (!startGame()) toMenu();
+        return;
+    }
+    bool ready = reuseSlots && int(slots_.size()) == n;
+    if (ready)
+        for (int d : slots_) ready = ready && d != kDeviceNone;
+    if (ready) {
+        if (!startGame()) toMenu();
+        return;
+    }
+    slots_.assign(n, kDeviceNone);
+    slots_[0] = starter;  // quem apertou "Jogar" já entra como Jogador 1
+    session_.reset();
+    screen_ = Screen::Assign;
+}
+
+// Um controle sumiu: libera as vagas dele. No meio da partida, pausa e pede para
+// atribuir de novo, sem perder o jogo.
+void App::padRemoved(int id) {
+    bool used = false;
+    for (int& d : slots_)
+        if (d == id) { d = kDeviceNone; used = true; }
+    if (used && screen_ == Screen::Game) screen_ = Screen::Assign;
+}
+
+void App::assignInput(const Input& in) {
+    auto owns = [&](int dev) { return std::find(slots_.begin(), slots_.end(), dev) != slots_.end(); };
+    switch (in.action) {
+        case Action::Confirm: case Action::Click: {
+            if (owns(in.device)) break;
+            auto it = std::find(slots_.begin(), slots_.end(), kDeviceNone);
+            if (it != slots_.end()) *it = in.device;
+            break;
+        }
+        case Action::Fill:  // o resto da turma divide este controle
+            for (int& d : slots_)
+                if (d == kDeviceNone) d = in.device;
+            break;
+        case Action::Back:
+            if (owns(in.device)) {
+                for (int& d : slots_)
+                    if (d == in.device) d = kDeviceNone;
+            } else if (std::all_of(slots_.begin(), slots_.end(), [](int d) { return d == kDeviceNone; })) {
+                toMenu();
+            }
+            return;
+        case Action::Quit: toMenu(); return;
+        default: return;
+    }
+    if (std::find(slots_.begin(), slots_.end(), kDeviceNone) == slots_.end()) {
+        if (session_) screen_ = Screen::Game;  // voltando de uma pausa
+        else if (!startGame()) toMenu();
+    }
+}
+
+void App::renderAssign() {
+    const int n = settings_.players;
+    gfx_.text("Controles", kBig, kInk, kW / 2, 100);
+    gfx_.text(session_ ? "Um controle desconectou: quem ficou sem controle aperta A de novo"
+                       : "Cada jogador aperta A (ou Enter) no seu controle",
+              kSmall, kMuted, kW / 2, 188);
+    const auto firstFree = std::find(slots_.begin(), slots_.end(), kDeviceNone);
+    for (int i = 0; i < n; ++i) {
+        const SDL_Rect rc{kW / 2 - 350, 232 + i * 92, 700, 76};
+        const bool next = firstFree != slots_.end() && i == int(firstFree - slots_.begin());
+        if (next) gfx_.fillRound({rc.x - 5, rc.y - 5, rc.w + 10, rc.h + 10}, 28, kInk);
+        gfx_.fillRound(rc, 24, kWhite);
+        gfx_.fillRound({rc.x + 14, rc.y + 14, 48, 48}, 24, kPlayerColor[i]);
+        gfx_.text("Jogador " + std::to_string(i + 1), kMedium, kInk, rc.x + 82, rc.y + rc.h / 2, Align::Left);
+        if (slots_[i] == kDeviceNone)
+            gfx_.text("aperte A", kSmall, kMuted, rc.x + rc.w - 28, rc.y + rc.h / 2, Align::Right);
+        else
+            gfx_.text(deviceName(slots_[i]), kMedium, kPlayerColor[i], rc.x + rc.w - 28, rc.y + rc.h / 2, Align::Right);
+    }
+    gfx_.text("A ou Enter: entrar     Y ou Tab: o resto joga neste controle", kSmall, kMuted, kW / 2, kH - 62);
+    gfx_.text("B ou Backspace: sair da vaga     Esc ou +: menu", kSmall, kMuted, kW / 2, kH - 28);
+}
+
 void App::handle(const Input& in) {
+    if (!allowed(in)) return;
     switch (screen_) {
         case Screen::Menu: menuInput(in); break;
+        case Screen::Assign: assignInput(in); break;
         case Screen::Game: gameInput(in); break;
         case Screen::Result: resultInput(in); break;
     }
@@ -770,11 +932,12 @@ void App::renderGame() {
             SDL_RenderCopy(gfx_.r, s.faceTex[s.game->card(i).face], nullptr, &img);
         }
     }
-    gfx_.text("Vez do Jogador " + std::to_string(turn + 1), kSmall, kPlayerColor[turn], 40, kH - 26,
-              Align::Left);
+    std::string who = "Vez do Jogador " + std::to_string(turn + 1);
+    if (s.game->players() > 1) who += " (" + deviceName(slots_[turn]) + ")";
+    gfx_.text(who, kSmall, kPlayerColor[turn], kW / 2, kH - 26);
     gfx_.text("Jogadas: " + std::to_string(s.game->moves()), kSmall, kMuted, kW - 40, kH - 26,
               Align::Right);
-    gfx_.text("Setas: mover   Enter ou A: virar   B: menu", kSmall, kMuted, kW / 2, kH - 26);
+    gfx_.text("A: virar   B: menu", kSmall, kMuted, 40, kH - 26, Align::Left);
 }
 
 void App::renderResult() {
@@ -800,6 +963,7 @@ void App::render() {
     SDL_RenderClear(gfx_.r);
     switch (screen_) {
         case Screen::Menu: renderMenu(); break;
+        case Screen::Assign: renderAssign(); break;
         case Screen::Game: renderGame(); break;
         case Screen::Result: renderResult(); break;
     }
